@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "moonhunt",
+  "version": "0.0.1",
+  "identifier": "com.werlos.moonhunt",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist-fresh"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "MoonHunt",
+        "width": 1067,
+        "minWidth": 452,
+        "height": 678,
+        "decorations": false,
+        "center": true,
+        "devtools": false
+      }
+    ],
+      "security": {
+        "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' http://localhost:* ws://localhost:* ipc: http://ipc.localhost; worker-src 'self'"
+      }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/aria2c"
+    ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["moonhunt"]
+      }
+    }
+  }
+}

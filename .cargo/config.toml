@@ -1,0 +1,13 @@
+[profile.dev]
+opt-level = 1
+split-debuginfo = "packed"
+
+[build]
+jobs = 4
+
+# ponytail: Stop cargo from watching binaries folder - prevents spurious rebuilds when aria2 starts
+# The build script only checks for aria2c.exe, but watching 100MB+ of binaries causes disk thrashing
+exclude = ["binaries"]
+
+[target-dir]
+path = "/home/werlos/tauri-target"

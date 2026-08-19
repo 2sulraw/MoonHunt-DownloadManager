@@ -1,0 +1,24 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Explicitly declare text files
+*.ts text
+*.tsx text
+*.vue text
+*.js text
+*.json text
+*.html text
+*.css text
+*.md text
+*.rs text
+*.toml text
+*.sql text
+
+# Declare binary files
+*.png binary
+*.jpg binary
+*.ico binary
+*.icns binary
+*.zip binary
+*.7z binary
+*.exe binary

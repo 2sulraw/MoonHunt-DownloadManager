@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <radialGradient id="bgGrad" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#141428"/>
+      <stop offset="100%" stop-color="#0a0e1a"/>
+    </radialGradient>
+    <radialGradient id="moonGrad" cx="40%" cy="35%" r="55%">
+      <stop offset="0%" stop-color="#f0f4f8"/>
+      <stop offset="70%" stop-color="#d0d8e4"/>
+      <stop offset="100%" stop-color="#b0bccd"/>
+    </radialGradient>
+    <linearGradient id="crossGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4fc3f7" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#4fc3f7" stop-opacity="0.4"/>
+    </linearGradient>
+    <linearGradient id="arrowGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#4fc3f7"/>
+      <stop offset="50%" stop-color="#81d4fa"/>
+      <stop offset="100%" stop-color="#b3e5fc"/>
+    </linearGradient>
+    <filter id="accentGlow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur" opacity="0.5"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <circle cx="128" cy="128" r="124" fill="url(#bgGrad)" stroke="rgba(79,195,247,0.06)" stroke-width="2"/>
+
+  <!-- Moon -->
+  <circle cx="98" cy="105" r="52" fill="url(#moonGrad)"/>
+
+  <!-- Craters -->
+  <ellipse cx="84" cy="85" rx="8" ry="7" fill="#9aa8b9" opacity="0.22"/>
+  <ellipse cx="116" cy="80" rx="5" ry="4.5" fill="#9aa8b9" opacity="0.18"/>
+  <ellipse cx="80" cy="128" rx="10" ry="9" fill="#9aa8b9" opacity="0.16"/>
+
+  <!-- Crosshair -->
+  <circle cx="175" cy="160" r="28" fill="none" stroke="url(#crossGrad)" stroke-width="2"/>
+  <line x1="175" y1="125" x2="175" y2="195" stroke="#4fc3f7" stroke-width="1.5" opacity="0.5"/>
+  <line x1="142" y1="160" x2="208" y2="160" stroke="#4fc3f7" stroke-width="1.5" opacity="0.5"/>
+  <circle cx="175" cy="160" r="3" fill="#4fc3f7" filter="url(#accentGlow)"/>
+
+  <!-- Download arrow -->
+  <path d="M 136 135 C 147 148, 158 150, 170 153" fill="none" stroke="url(#arrowGrad)" stroke-width="2" stroke-linecap="round" opacity="0.8"/>
+  <path d="M 168 153 L 162 145 L 175 151 Z" fill="url(#arrowGrad)" opacity="0.9"/>
+</svg>
