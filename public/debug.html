@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Speed Limit Debug Log</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0e1a;
+    color: #b8bdd5;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 12px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    background: #16162a;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    flex-shrink: 0;
+  }
+  .header-title {
+    color: #ffd54f;
+    font-weight: 700;
+    font-size: 13px;
+  }
+  .header-badge {
+    font-size: 10px;
+    color: #81c784;
+    background: rgba(129,199,132,0.12);
+    padding: 2px 8px;
+    border-radius: 8px;
+    font-weight: 600;
+  }
+  .header-count {
+    color: #666;
+    font-size: 11px;
+    background: rgba(255,255,255,0.05);
+    padding: 2px 8px;
+    border-radius: 8px;
+  }
+  .header-spacer { flex: 1; }
+  .header-btn {
+    background: none;
+    border: 1px solid rgba(255,255,255,0.08);
+    color: #888;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+    padding: 4px 12px;
+    border-radius: 6px;
+    transition: all 0.15s;
+  }
+  .header-btn:hover {
+    color: #fff;
+    background: rgba(255,255,255,0.06);
+    border-color: rgba(255,255,255,0.12);
+  }
+  .log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0;
+  }
+  .log::-webkit-scrollbar { width: 6px; }
+  .log::-webkit-scrollbar-track { background: transparent; }
+  .log::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+  .empty {
+    color: #444;
+    text-align: center;
+    padding: 40px 20px;
+    font-style: italic;
+  }
+  .entry {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 4px 16px;
+    line-height: 1.6;
+    transition: background 0.1s;
+  }
+  .entry:hover { background: rgba(255,255,255,0.02); }
+  .entry.error { color: #ef5350; }
+  .entry.error .entry-source { color: #ef5350; }
+  .entry-time {
+    color: #444;
+    flex-shrink: 0;
+    font-size: 11px;
+    min-width: 80px;
+  }
+  .entry-source {
+    color: #4fc3f7;
+    font-weight: 700;
+    flex-shrink: 0;
+    min-width: 100px;
+  }
+  .entry-detail {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .entry-gid {
+    color: #666;
+    font-size: 10px;
+    flex-shrink: 0;
+    min-width: 100px;
+  }
+  .entry-limit {
+    color: #81c784;
+    font-weight: 600;
+    flex-shrink: 0;
+    min-width: 80px;
+    text-align: right;
+  }
+  .entry-ok { color: #81c784; }
+  .entry-fail { color: #ef5350; }
+</style>
+</head>
+<body>
+<div class="header">
+  <span class="header-title">[DEBUG] Speed Limit Log</span>
+  <span class="header-badge" id="status">Connected</span>
+  <span class="header-count" id="count">0</span>
+  <span class="header-spacer"></span>
+  <button class="header-btn" onclick="clearLog()">Clear</button>
+</div>
+<div class="log" id="log">
+  <div class="empty" id="empty">Waiting for speed limit events...</div>
+</div>
+
+<script>
+  const logEl = document.getElementById('log');
+  const countEl = document.getElementById('count');
+  const emptyEl = document.getElementById('empty');
+  let entries = [];
+
+  function addEntry(entry) {
+    entries.push(entry);
+    if (entries.length > 200) entries.shift();
+    countEl.textContent = entries.length;
+    emptyEl.style.display = 'none';
+
+    const div = document.createElement('div');
+    div.className = 'entry' + (entry.ok ? '' : ' error');
+
+    div.innerHTML =
+      '<span class="entry-time">' + esc(entry.time) + '</span>' +
+      '<span class="entry-source">' + esc(entry.source) + '</span>' +
+      '<span class="entry-detail">' + esc(entry.detail) + '</span>' +
+      '<span class="entry-gid">' + esc(entry.gid ? entry.gid.slice(0, 14) : '') + '</span>' +
+      '<span class="entry-limit">' + esc(entry.limit) + '</span>';
+
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function clearLog() {
+    entries = [];
+    countEl.textContent = '0';
+    logEl.innerHTML = '<div class="empty" id="empty">Waiting for speed limit events...</div>';
+    emptyEl = document.getElementById('empty');
+    localStorage.removeItem('moonhunt_debug_logs');
+  }
+
+  function esc(s) {
+    if (!s) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // Load any existing entries on startup
+  try {
+    var stored = JSON.parse(localStorage.getItem('moonhunt_debug_logs') || '[]');
+    stored.forEach(addEntry);
+  } catch(e) {}
+
+  // Listen for new entries written by the main window via localStorage
+  window.addEventListener('storage', function(e) {
+    if (e.key === 'moonhunt_debug_logs' && e.newValue) {
+      try {
+        var all = JSON.parse(e.newValue);
+        // Only add entries beyond what we already have
+        var toAdd = all.slice(entries.length);
+        toAdd.forEach(addEntry);
+      } catch(err) {}
+    }
+  });
+
+  document.getElementById('status').textContent = 'Listening';
+</script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for MoonHunt",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:webview:allow-create-webview-window",
+    "shell:allow-open",
+    "dialog:allow-open",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "binaries/aria2c",
+          "sidecar": true,
+          "args": true
+        },
+        {
+          "name": "binaries/yt-dlp-x86_64-pc-windows-msvc",
+          "sidecar": true,
+          "args": true
+        }
+      ]
+    }
+  ]
+}
