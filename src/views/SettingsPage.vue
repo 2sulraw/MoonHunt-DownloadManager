@@ -354,8 +354,8 @@
             <button @click="openTutorial('chrome')" class="btn-tutorial">
               <i class="material-icons">lightbulb</i> {{ t('Chrome Tutorial') }}
             </button>
-            <button class="btn-tutorial btn-tutorial-disabled" :title="t('Tutorial not available yet')" disabled>
-              <i class="material-icons">lightbulb</i> {{ t('Firefox Tutorial') }} — {{ t('Tutorial not available yet') }}
+            <button @click="openFirefoxAddonPage" class="btn-tutorial">
+              <i class="material-icons">lightbulb</i> {{ t('Firefox Tutorial') }}
             </button>
           </div>
         </div>
@@ -3023,6 +3023,13 @@ function openTutorial(browser: 'chrome' | 'firefox') {
 
 function openTutorialRepo() {
   const url = 'https://github.com/2sulraw/MoonHunt-DownloadManager'
+  invoke('open_external', { url }).catch(() => {
+    window.open(url, '_blank', 'noopener')
+  })
+}
+
+function openFirefoxAddonPage() {
+  const url = 'https://addons.mozilla.org/en-US/firefox/addon/moonhunt-download-manager/'
   invoke('open_external', { url }).catch(() => {
     window.open(url, '_blank', 'noopener')
   })

@@ -194,6 +194,14 @@ pub fn init_db(app: &tauri::AppHandle) -> Result<(), String> {
     }
 
     let db_path = get_db_path(app)?;
+    // SQLite cannot create missing parent directories. On a fresh install
+    // %LOCALAPPDATA%\com.werlos.moonhunt\ does not exist yet, so Connection::open
+    // fails with SQLITE_CANTOPEN → setup() errors → the app panics and exits,
+    // showing only a white window flash on first launch. Create the dir first.
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create app data directory: {}", e))?;
+    }
     let conn = Connection::open(&db_path)
         .map_err(|e| format!("Failed to open DB: {}", e))?;
     conn.pragma_update(None, "journal_mode", "WAL")
