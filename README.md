@@ -31,6 +31,11 @@ aria2 is bundled — no extra setup required.
 A companion browser extension (Chromium + Firefox) is available at
 [MoonHunt-Extension](https://github.com/2sulraw/MoonHunt-Extension).
 
+**Firefox:** install directly from
+[Firefox Add-ons (AMO)](https://addons.mozilla.org/en-US/firefox/addon/moonhunt-download-manager/).
+
+The Chromium version is available from the extension repo above.
+
 ## Development
 
 ### Prerequisites
