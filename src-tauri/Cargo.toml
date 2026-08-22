@@ -41,6 +41,7 @@ base64 = "0.22"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.52"
+runas = "1"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_UI_Shell",

@@ -2,7 +2,6 @@ use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 use tauri::Emitter;
 use tauri::Manager;
@@ -97,9 +96,6 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<UpdateStatus, Str
     }
 }
 
-/// Download the new installer from the release and launch it.
-/// The NSIS setup self-elevates and overwrites the installed app; exiting this
-/// process lets the new install replace the running instance.
 /// Cache filename for an installer asset URL. The URL's last segment is the
 /// versioned asset name (e.g. `moonhunt_0.1.5_x64-setup.exe`), so it's a
 /// reliable per-version cache key.
@@ -112,6 +108,36 @@ fn installer_filename(asset_url: &str) -> String {
         .last()
         .map(|s| s.to_string())
         .unwrap_or_else(|| "MoonHunt-setup.exe".to_string())
+}
+
+/// Spawn the downloaded NSIS installer with UAC elevation.
+///
+/// Since v0.0.2 the setup is `perMachine` and its manifest requires admin,
+/// so a plain `Command::spawn` (CreateProcess) fails with OS error 740
+/// (`ERROR_ELEVATION_REQUIRED`) — CreateProcess cannot trigger the UAC
+/// prompt. `runas` uses ShellExecuteEx with the `runas` verb, which can.
+///
+/// Returns true when a new process was started. A cancellation (user clicks
+/// "No" on the UAC prompt) yields an IO error whose raw_os_error is 1223
+/// (`ERROR_CANCELLED`) — that's not a failure of our code, so we surface it
+/// as Ok(false) to avoid alarming "update failed" UI for a user choice.
+fn spawn_installer_elevated(installer: &std::path::Path) -> Result<bool, String> {
+    match std::process::Command::new("explorer.exe")
+        .arg(installer)
+        .spawn()
+    {
+        Ok(_) => return Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("Failed to launch installer: {}", e)),
+    }
+    // Fallback for exotic setups without explorer: direct CreateProcess via
+    // runas; reports ERROR_CANCELLED (user declined UAC) as Ok(false).
+    use runas::Command as RunasCommand;
+    match RunasCommand::new(installer).status() {
+        Ok(_) => Ok(true),
+        Err(e) if e.raw_os_error() == Some(1223) => Ok(false),
+        Err(e) => Err(format!("Failed to launch installer: {}", e)),
+    }
 }
 
 #[tauri::command]
@@ -132,12 +158,7 @@ pub async fn install_update(app: tauri::AppHandle, asset_url: String) -> Result<
     // Same version already downloaded → relaunch it instantly, no re-download,
     // and don't force-exit (the user may have canceled the first time).
     if out_path.exists() && out_path.metadata().map(|m| m.len()).unwrap_or(0) > 0 {
-        Command::new(&out_path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| format!("Failed to launch installer: {}", e))?;
+        spawn_installer_elevated(&out_path)?;
         return Ok(out_path.to_string_lossy().into_owned());
     }
 
@@ -187,14 +208,14 @@ pub async fn install_update(app: tauri::AppHandle, asset_url: String) -> Result<
     std::fs::rename(&temp_path, &out_path)
         .map_err(|e| format!("Failed to finalize download: {}", e))?;
 
-    // Fresh (new-version) download → launch it and let the running instance
-    // exit so the new build can replace it. NSIS needs a moment to unpack.
-    Command::new(&out_path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to launch installer: {}", e))?;
+    // Fresh (new-version) download → launch it elevated and let the running
+    // instance exit so the new build can replace it. NSIS needs a moment to
+    // unpack. If the user declines the UAC prompt we keep the app open.
+    match spawn_installer_elevated(&out_path) {
+        Ok(true) => {}
+        Ok(false) => return Ok(out_path.to_string_lossy().into_owned()),
+        Err(e) => return Err(e),
+    }
     let handle = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(2500));
