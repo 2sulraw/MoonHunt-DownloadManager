@@ -336,6 +336,17 @@ pub fn run() {
                     // Throttled to once per 5s — 1-2 rows typically, cheap.
                     if include_stopped {
                         for item in &result {
+                            // Only sync genuinely live tasks. `result` also
+                            // contains the whole stopped history on these
+                            // ticks; without this guard every completed
+                            // download's DB row is rewritten back to `active`
+                            // every 5s — and after a relaunch the orphan sweep
+                            // then flips those fake actives to `error`, because
+                            // completion removes the .aria2 control file.
+                            let st = item.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                            if st != "active" && st != "waiting" && st != "paused" {
+                                continue;
+                            }
                             let (Some(gid), Some(filename)) = (
                                 item.get("gid").and_then(|v| v.as_str()),
                                 item.get("files").and_then(|f| f.as_array()).and_then(|a| a.first())
@@ -415,6 +426,36 @@ pub fn run() {
                                 let resumable = !filename.is_empty()
                                     && !url.is_empty()
                                     && control_file.exists();
+
+                                // Heal legacy corruption: the old size-sync block wrote
+                                // every stopped-history item back as `active`. A finished
+                                // download has no .aria2 control file but its complete
+                                // file exists on disk — restore its true terminal state
+                                // instead of erroring it as a broken partial.
+                                if !resumable {
+                                    let full_file = std::path::Path::new(&dir).join(&filename);
+                                    if !filename.is_empty() && full_file.exists() {
+                                        crate::logln!("[aria2] Orphan {} ({}) has complete file on disk — healing to complete", gid, filename);
+                                        let healed = DownloadRecord {
+                                            gid: gid.to_string(),
+                                            filename: filename.clone(),
+                                            url,
+                                            size: row.get("size").and_then(|v| v.as_str()).unwrap_or("0").to_string(),
+                                            status: "complete".to_string(),
+                                            progress: 100,
+                                            added_at: row.get("added_at").and_then(|v| v.as_i64()).unwrap_or(0),
+                                            path: Some(full_file.to_string_lossy().to_string()),
+                                            connections: row.get("connections").and_then(|v| v.as_i64()).map(|n| n as i32),
+                                            source: row.get("source").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                            ytdlp_token: row.get("ytdlp_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                            proxy: row.get("proxy").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                        };
+                                        if crate::db::upsert_download(app_handle.clone(), healed).is_ok() {
+                                            orphan_persisted.push(gid.to_string());
+                                        }
+                                        continue;
+                                    }
+                                }
 
                                 if resumable {
                                     crate::logln!("[aria2] Re-adding paused orphan {} ({}) — resumable partial found", gid, filename);
