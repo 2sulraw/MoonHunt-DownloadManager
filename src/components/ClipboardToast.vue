@@ -9,7 +9,7 @@
         </div>
       </div>
       <div class="toast-actions">
-        <button class="toast-btn toast-btn-primary" @click="$emit('add-download', toast.url)">{{ t('Add') }}</button>
+        <button class="toast-btn toast-btn-primary" @click="dismiss(toast.id); $emit('add-download', toast.url)">{{ t('Add') }}</button>
         <button class="toast-btn toast-btn-ghost" @click="dismiss(toast.id)">{{ t('Dismiss') }}</button>
       </div>
     </div>

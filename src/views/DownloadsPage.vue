@@ -157,7 +157,7 @@
     </div>
 
     <!-- â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-         LIST VIEW â€” rendered when viewMode === 'list'
+         LIST VIEW â€" rendered when viewMode === 'list'
          Full-width cards with filename, status, progress, actions
          â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
     <div v-if="viewMode === 'list'" ref="listContainerRef" class="downloads-list drag-list-container" :class="{ 'grab-mode': grabEnabled }">
@@ -276,7 +276,7 @@
     </div>
 
     <!-- â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-         COMPACT LIST â€” rendered when viewMode === 'compact'
+         COMPACT LIST â€" rendered when viewMode === 'compact'
          Single-row per download, tight spacing, minimal chrome
          â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
     <div v-else-if="viewMode === 'compact'" ref="compactContainerRef" class="downloads-compact drag-list-container" :class="{ 'grab-mode': grabEnabled }">
@@ -1119,7 +1119,7 @@
     />
 
     <!-- â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-         DOWNLOAD DETAILS MODAL â€” table layout, modern UX
+         DOWNLOAD DETAILS MODAL â€" table layout, modern UX
          â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
     <transition name="modal-fade">
       <div v-if="showDetailsModal" class="details-overlay">
@@ -1160,14 +1160,14 @@
               <button role="tab" class="dm-tab" :class="{ active: activeDetailsTab === 'general' }" @click="activeDetailsTab = 'general'">
                 <i class="material-icons">dashboard</i><span>{{ t('General') }}</span>
               </button>
-              <button role="tab" class="dm-tab" :class="{ active: activeDetailsTab === 'files' }" @click="activeDetailsTab = 'files'">
-                <i class="material-icons">folder_open</i><span>{{ t('Files') }}</span>
-              </button>
               <button role="tab" class="dm-tab" :class="{ active: activeDetailsTab === 'network' }" @click="activeDetailsTab = 'network'">
                 <i class="material-icons">dns</i><span>{{ t('Network') }}</span>
               </button>
               <button role="tab" class="dm-tab" :class="{ active: activeDetailsTab === 'history' }" @click="activeDetailsTab = 'history'">
                 <i class="material-icons">history</i><span>{{ t('History') }}</span>
+              </button>
+              <button role="tab" class="dm-tab" :class="{ active: activeDetailsTab === 'log' }" @click="loadDownloadEvents(); activeDetailsTab = 'log'">
+                <i class="material-icons">terminal</i><span>{{ t('Log') }}</span>
               </button>
             </nav>
 
@@ -1199,7 +1199,7 @@
                       </tr>
                       <tr>
                         <th>{{ t('Size') }}</th>
-                        <td>{{ formatFileSize(Number(selectedDownloadDetails?.totalLength) || 0) }}</td>
+                        <td>{{ Number(selectedDownloadDetails?.totalLength) ? formatFileSize(Number(selectedDownloadDetails?.totalLength)) : (selectedDownloadDetails?.totalLength || '—') }}</td>
                       </tr>
                       <tr v-if="selectedDownload?.speed && selectedDownload?.status === 'active'">
                         <th>{{ t('Speed') }}</th>
@@ -1251,50 +1251,54 @@
                     </tbody>
                   </table>
                 </div>
-              </section>
-
-              <section v-if="activeDetailsTab === 'files'" class="dm-panel" role="tabpanel">
-                <div v-if="selectedDownloadDetails?.files?.length" class="dm-file-table-wrapper">
-                  <table class="dm-file-table">
-                    <thead>
-                      <tr>
-                        <th>{{ t('File') }}</th>
-                        <th>{{ t('Size') }}</th>
-                        <th>{{ t('Progress') }}</th>
-                        <th>{{ t('Path') }}</th>
-                        <th></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="(file, i) in selectedDownloadDetails.files" :key="i">
-                        <td class="dm-file-name-cell">
-                          <i class="material-icons" :class="getFileIcon(file.path)">{{ getFileIcon(file.path) }}</i>
-                          <span class="dm-file-name">{{ file.path?.split(/[\\/]/).pop() || file.path }}</span>
-                        </td>
-                        <td>{{ formatFileSize(Number(file.length) || 0) }}</td>
-                        <td class="dm-file-progress-cell">
-                          <div v-if="file.length && file.completedLength" class="dm-mini-progress">
-                            <div class="dm-mini-track">
-                              <div class="dm-mini-fill" :style="{ width: ((Number(file.completedLength) / Number(file.length)) * 100) + '%' }"></div>
+                <div class="dm-section">
+                  <h3 class="dm-section-title">{{ t('Files') }}</h3>
+                  <div v-if="detailsLoading" class="dm-empty-state">
+                    <i class="material-icons">hourglass_empty</i>
+                    <p>{{ t('Loading...') }}</p>
+                  </div>
+                  <div v-else-if="selectedDownloadDetails?.files?.length" class="dm-file-table-wrapper">
+                    <table class="dm-file-table">
+                      <thead>
+                        <tr>
+                          <th>{{ t('File') }}</th>
+                          <th>{{ t('Size') }}</th>
+                          <th>{{ t('Progress') }}</th>
+                          <th>{{ t('Path') }}</th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="(file, i) in selectedDownloadDetails.files" :key="i">
+                          <td class="dm-file-name-cell">
+                            <i class="material-icons" :class="getFileIcon(file.path)">{{ getFileIcon(file.path) }}</i>
+                            <span class="dm-file-name">{{ file.path?.split(/[\\/]/).pop() || file.path }}</span>
+                          </td>
+                          <td>{{ formatFileSize(Number(file.length) || 0) }}</td>
+                          <td class="dm-file-progress-cell">
+                            <div v-if="file.length && file.completedLength" class="dm-mini-progress">
+                              <div class="dm-mini-track">
+                                <div class="dm-mini-fill" :style="{ width: ((Number(file.completedLength) / Number(file.length)) * 100) + '%' }"></div>
+                              </div>
+                              <span>{{ ((Number(file.completedLength) / Number(file.length)) * 100).toFixed(1) }}%</span>
                             </div>
-                            <span>{{ ((Number(file.completedLength) / Number(file.length)) * 100).toFixed(1) }}%</span>
-                          </div>
-                          <span v-else>â€”</span>
-                        </td>
-                        <td class="dm-path-cell" :title="file.path">{{ file.path }}</td>
-                        <td>
-                          <button class="dm-icon-btn" @click="copyToClipboard(file.path)" :title="t('Copy path')">
-                            <i class="material-icons">content_copy</i>
-                          </button>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-                <div v-else class="dm-empty-state">
-                  <i class="material-icons">folder_open</i>
-                  <p>{{ t('No file information available') }}</p>
-                  <span class="dm-hint">{{ t('Files appear after download starts') }}</span>
+                            <span v-else>—</span>
+                          </td>
+                          <td class="dm-path-cell" :title="file.path">{{ file.path }}</td>
+                          <td>
+                            <button class="dm-icon-btn" @click="copyToClipboard(file.path)" :title="t('Copy path')">
+                              <i class="material-icons">content_copy</i>
+                            </button>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div v-else class="dm-empty-state">
+                    <i class="material-icons">folder_open</i>
+                    <p>{{ t('No file information available') }}</p>
+                    <span class="dm-hint">{{ t('Files appear after download starts') }}</span>
+                  </div>
                 </div>
               </section>
 
@@ -1306,7 +1310,7 @@
                       <tr>
                         <th>{{ t('URL') }}</th>
                         <td class="dm-url-cell">
-                          <span class="dm-url-text">{{ selectedDownload?.url || selectedDownload?.uri || 'â€”' }}</span>
+                          <span class="dm-url-text">{{ selectedDownload?.url || selectedDownload?.uri || 'â€"' }}</span>
                           <button v-if="selectedDownload?.url || selectedDownload?.uri" class="dm-icon-btn" @click="copyToClipboard(selectedDownload?.url || selectedDownload?.uri)" :title="t('Copy URL')">
                             <i class="material-icons">content_copy</i>
                           </button>
@@ -1382,6 +1386,32 @@
                   </div>
                 </div>
               </section>
+
+              <section v-if="activeDetailsTab === 'log'" class="dm-panel" role="tabpanel">
+                <div v-if="downloadEvents.length === 0" class="dm-empty">
+                  <i class="material-icons">terminal</i>
+                  <p>{{ t('No events recorded yet') }}</p>
+                </div>
+                <template v-else>
+                  <div class="dm-log-health">
+                    <svg viewBox="0 0 24 24" class="dm-log-circle" :class="{ good: logPacketLoss.health > 0.8, warn: logPacketLoss.health > 0.5 && logPacketLoss.health <= 0.8, bad: logPacketLoss.health <= 0.5 }">
+                      <circle cx="12" cy="12" r="10" fill="none" stroke="var(--border)" stroke-width="3" />
+                      <circle cx="12" cy="12" r="10" fill="none" stroke="var(--accent)" stroke-width="3" stroke-dasharray="62.83" :stroke-dashoffset="62.83 * (1 - logPacketLoss.health)" stroke-linecap="round" transform="rotate(-90 12 12)" />
+                    </svg>
+                    <div class="dm-log-health-text">
+                      <span class="dm-log-health-pct">{{ Math.round(logPacketLoss.health * 100) }}%</span>
+                      <span class="dm-log-health-label">{{ t('Packets') }}</span>
+                    </div>
+                  </div>
+                  <div class="dm-log-list">
+                    <div v-for="event in downloadEvents" :key="event.id" class="dm-log-entry" :class="event.eventType">
+                      <span class="dm-log-time">{{ formatLogTime(event.timestamp) }}</span>
+                      <span class="dm-log-badge" :class="event.eventType">{{ t(event.eventType.replace('_', ' ')) }}</span>
+                      <span class="dm-log-detail">{{ event.detail }}</span>
+                    </div>
+                  </div>
+                </template>
+              </section>
             </div>
 
             <footer class="dm-footer">
@@ -1433,7 +1463,7 @@ import HashVerifyDialog from '../components/HashVerifyDialog.vue'
 import CategoryPicker from '../components/CategoryPicker.vue'
 import { loadDownloadCategories } from '../composables/useDownloadCategories'
 import { resolveCategoryDir, type DownloadCategoryMode } from '../utils/downloadCategories'
-import type { Download } from '../types/download'
+import type { Download, DownloadEvent } from '../types/download'
 import type { DownloadDetails } from '../types/settings'
 import { useI18n } from '../i18n'
 
@@ -1548,6 +1578,9 @@ function persistSortPreferences() {
 }
 
 function setSortOption(opt: string) {
+  if (opt === 'manual' && sortOption.value !== 'manual') {
+    customOrder.value = sortedDownloads.value.map(d => d.gid)
+  }
   sortOption.value = opt
   sortMenuOpen.value = false
   persistSortPreferences()
@@ -2176,7 +2209,7 @@ function formatGroupDate(value?: number): string {
 
 // -- View Mode --
 function setViewMode(mode: string) {
-  // Cancel any active drag before switching views â€” the drag state
+  // Cancel any active drag before switching views â€" the drag state
   // (indices, ghost clone, snapshot rects) belongs to the old view's DOM.
   if (sorting.value) {
     toggleGrabEnabled()
@@ -2263,7 +2296,7 @@ onMounted(() => {
 })
 
 // -- Data fetching --
-// Downloads are provided by MainLayout via props â€” no internal fetch needed.
+// Downloads are provided by MainLayout via props â€" no internal fetch needed.
 // Actions emit events to MainLayout to trigger refreshes.
 
 // -- New Download Dialog --
@@ -2978,8 +3011,15 @@ const triggeredGroups = new Set<string>()
 async function executeGroupAction(action: string) {
   try {
     if (action === 'close') {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window')
-      getCurrentWindow().close()
+      let remaining = 5
+      notify(t('App will close in') + ' ' + remaining + ' ' + t('seconds') + '...', 'info')
+      const timer = setInterval(() => {
+        remaining--
+        if (remaining <= 0) {
+          clearInterval(timer)
+          invoke('quit_app')
+        }
+      }, 1000)
     } else if (action === 'sleep') {
       const { Command } = await import('@tauri-apps/plugin-shell')
       await Command.create('exec', ['powershell', '-Command', 'rundll32.exe powrprof.dll,SetSuspendState 0,1,0']).execute()
@@ -3074,10 +3114,34 @@ const showDetailsModal = ref(false)
 const selectedDownload = ref<Download | null>(null)
 const selectedDownloadDetails = ref<DownloadDetails | null>(null)
 const activeDetailsTab = ref('general')
+const detailsLoading = ref(false)
+const downloadEvents = ref<DownloadEvent[]>([])
+
+const logPacketLoss = computed(() => {
+  const errors = downloadEvents.value.filter(e => e.eventType === 'error').length
+  const samples = downloadEvents.value.filter(e => e.eventType === 'speed_sample').length
+  const total = errors + samples
+  if (total === 0) return { health: 1, errors: 0, total: 0 }
+  return { health: 1 - errors / total, errors, total }
+})
+
+function formatLogTime(ts: number) {
+  return new Date(ts).toLocaleTimeString()
+}
+
+async function loadDownloadEvents() {
+  if (!selectedDownload.value) return
+  try {
+    downloadEvents.value = await invoke('get_download_events', { gid: selectedDownload.value.gid })
+  } catch {
+    downloadEvents.value = []
+  }
+}
 
 function showDownloadDetails(download: Download) {
   selectedDownload.value = download
   selectedDownloadDetails.value = null
+  detailsLoading.value = true
   activeDetailsTab.value = 'general'
   detailProxy.value = parseProxyString(download.proxy)
   proxySaveMessage.value = ''
@@ -3088,6 +3152,8 @@ function showDownloadDetails(download: Download) {
     selectedDownloadDetails.value = details
   }).catch((e: unknown) => {
     console.error('Failed to fetch details:', e)
+  }).finally(() => {
+    detailsLoading.value = false
   })
 }
 
@@ -3318,16 +3384,16 @@ async function clearHistory() {
 
 function getDownloadFolder(): string {
   if (selectedDownload?.value?.path) {
-    return selectedDownload.value.path.split(/[\\/]/).slice(0, -1).join('\\') || 'â€”'
+    return selectedDownload.value.path.split(/[\\/]/).slice(0, -1).join('\\') || 'â€"'
   }
   if (selectedDownloadDetails?.value?.files?.[0]?.path) {
-    return selectedDownloadDetails.value.files[0].path.split(/[\\/]/).slice(0, -1).join('\\') || 'â€”'
+    return selectedDownloadDetails.value.files[0].path.split(/[\\/]/).slice(0, -1).join('\\') || 'â€"'
   }
-  return 'â€”'
+  return 'â€"'
 }
 
 function copyToClipboard(text?: string | null): void {
-  if (!text || text === 'â€”') return
+  if (!text || text === 'â€"') return
   navigator.clipboard.writeText(text).then(() => {
     notify(t('Copied to clipboard'), 'success')
   }).catch(() => {
@@ -3338,10 +3404,10 @@ function copyToClipboard(text?: string | null): void {
 </script>
 
 <style scoped>
-/* â”€â”€ Page â”€â”€ */
+/* â"€â"€ Page â"€â"€ */
 .downloads-page { color: var(--text); }
 
-/* â”€â”€ Hero (copied from SettingsPage) â”€â”€ */
+/* â"€â"€ Hero (copied from SettingsPage) â"€â"€ */
 .settings-hero {
   display: flex;
   align-items: center;
@@ -3424,7 +3490,7 @@ function copyToClipboard(text?: string | null): void {
   max-width: 380px;
 }
 
-/* â”€â”€ Hero Bottom Bar â”€â”€ */
+/* â"€â"€ Hero Bottom Bar â"€â"€ */
 .hero-bottom-bar {
   position: absolute;
   bottom: 16px;
@@ -3512,7 +3578,7 @@ function copyToClipboard(text?: string | null): void {
   font-size: 18px;
 }
 
-/* â”€â”€ Toolbar â”€â”€ */
+/* â"€â"€ Toolbar â"€â"€ */
 .filter-bar {
   position: relative;
   display: flex;
@@ -3643,7 +3709,7 @@ html[dir='rtl'] .filter-bar.pos-2 .filter-btn-indicator { transform: translateX(
 .sort-option.active { font-weight: 600; }
 .sort-check { font-size: 16px; color: var(--accent-strong); }
 
-/* â”€â”€ Color picker â”€â”€ */
+/* â"€â"€ Color picker â"€â"€ */
 .color-picker-row { display: flex; gap: 6px; flex-wrap: wrap; }
 .color-swatch {
   width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent;
@@ -3652,7 +3718,7 @@ html[dir='rtl'] .filter-bar.pos-2 .filter-btn-indicator { transform: translateX(
 .color-swatch:hover { transform: scale(1.15); }
 .color-swatch.selected { border-color: #fff; box-shadow: 0 0 0 2px var(--accent); transform: scale(1.1); }
 
-/* â”€â”€ Sticky toolbar â”€â”€ */
+/* â"€â"€ Sticky toolbar â"€â"€ */
 .sticky-toolbar {
   position: fixed; top: 50px; left: var(--sidebar-width, 72px); right: 0; z-index: 900;
   display: flex; align-items: center; gap: 10px;
@@ -3667,7 +3733,7 @@ html[dir='rtl'] .sticky-toolbar {
 .sticky-fade-enter-active, .sticky-fade-leave-active { transition: opacity 0.2s ease; }
 .sticky-fade-enter-from, .sticky-fade-leave-to { opacity: 0; }
 
-/* â”€â”€ Views â”€â”€ */
+/* â"€â"€ Views â"€â"€ */
 .downloads-list, .downloads-compact { display: flex; flex-direction: column; gap: 6px; padding-bottom: 40px; }
 .top-level-drop-zone {
   display: flex;
@@ -3694,7 +3760,7 @@ html[dir='rtl'] .sticky-toolbar {
 .top-level-drop-zone .material-icons { font-size: 18px; }
 
 
-/* â”€â”€ Groups â”€â”€ */
+/* â"€â"€ Groups â"€â"€ */
 .group-options-toggle.active { color: var(--accent-strong); background: rgba(var(--accent-rgb), 0.1); }
 .group-options-toggle .material-icons { transition: transform 0.2s ease; font-size: 18px; }
 .group-options-toggle .material-icons.rotated { transform: rotate(-90deg); }
@@ -4114,13 +4180,13 @@ input[type="number"] {
   cursor: auto;
 }
 
-/* â”€â”€ Empty state â”€â”€ */
+/* â"€â"€ Empty state â"€â"€ */
 .empty-state { text-align: center; padding: 60px 20px; color: var(--text-dim); }
 .empty-state i { font-size: 48px; opacity: 0.3; }
 .empty-state p { font-size: 16px; font-weight: 600; margin: 12px 0 4px; color: var(--text); }
 .empty-state span { font-size: 13px; }
 
-/* â”€â”€ Old generic dialog styles (keep for Create Group dialog) â”€â”€ */
+/* â"€â"€ Old generic dialog styles (keep for Create Group dialog) â"€â"€ */
 .modal-overlay {
   position: fixed; top: 0; left: 0; right: 0; bottom: 0;
   background: rgba(0,0,0,0.85); display: flex; align-items: center; justify-content: center; z-index: 1000;
@@ -4166,10 +4232,10 @@ input[type="number"] {
 .sort-pop-enter-from, .sort-pop-leave-to { opacity: 0; transform: translateY(-4px); }
 
 /* =============================================================================
-   NEW DOWNLOAD MODAL â€” Beautiful
+   NEW DOWNLOAD MODAL â€" Beautiful
    ============================================================================= */
 
-/* â”€â”€ Overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* â"€â"€ Overlay â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€ */
 .nd-overlay {
   position: fixed;
   inset: 0;
@@ -4208,10 +4274,10 @@ input[type="number"] {
   overflow: hidden;
 }
 
-/* â”€â”€ Decorative glow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* â"€â"€ Decorative glow â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€ */
 
 
-/* â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* â"€â"€ Header â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€ */
 .nd-header {
   position: relative;
   z-index: 1;
@@ -4471,7 +4537,7 @@ input[type="number"] {
   border-radius: 100px; border: 1px solid rgba(var(--accent-rgb), 0.12);
   white-space: nowrap; flex-shrink: 0;
 }
-/* â”€â”€ Field â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */ 
+/* â"€â"€ Field â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€ */ 
 .nd-field { display: flex; flex-direction: column; gap: 7px; }
 .nd-field-grow { flex: 1; min-width: 0; }
 .nd-label {
@@ -4592,7 +4658,7 @@ input[type="number"] {
 .nd-btn-secondary i { font-size: 14px; }
 .nd-btn-secondary:hover { background: rgba(var(--accent-rgb), 0.08); color: var(--accent-strong); border-color: rgba(var(--accent-rgb), 0.2); }
 
-/* â”€â”€ Duplicate URL Warning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* â"€â"€ Duplicate URL Warning â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€ */
 .nd-duplicate-warning {
   display: flex;
   align-items: center;
@@ -4708,7 +4774,7 @@ input[type="number"] {
   font-size: 16px;
 }
 
-/* â”€â”€ Highlight Glow Animation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* â"€â"€ Highlight Glow Animation â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€ */
 .highlight-glow {
   animation: highlightPulse 3s ease-out;
 }
@@ -4728,7 +4794,7 @@ input[type="number"] {
   }
 }
 
-/* â”€â”€ Footer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* â"€â"€ Footer â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€ */
 .nd-clipboard-badge {
   display: inline-flex;
   align-items: center;
@@ -4827,7 +4893,7 @@ input[type="number"] {
 .nd-spinner { animation: ndSpin 0.7s linear infinite; }
 @keyframes ndSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
-/* â”€â”€ Responsive â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* â"€â"€ Responsive â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€ */
 @media (max-width: 520px) {
   .nd-overlay { padding: 0; align-items: flex-end; }
   .nd-modal {
@@ -4845,7 +4911,7 @@ input[type="number"] {
   .nd-footer { padding: 8px 12px 12px; }
 }
 
-/* â”€â”€ DETAILS MODAL â”€â”€ */
+/* â"€â"€ DETAILS MODAL â"€â"€ */
 .details-overlay {
   position: fixed; top: 0; left: 0; right: 0; bottom: 0;
   background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center;
@@ -4999,6 +5065,32 @@ input[type="number"] {
 .dm-proxy-message.ok { color: var(--status-complete); }
 .dm-proxy-message:not(.ok) { color: var(--status-error); }
 
+.dm-empty { text-align: center; padding: 40px 20px; color: var(--text-dim); }
+.dm-empty i { font-size: 36px; opacity: 0.4; display: block; margin-bottom: 8px; }
+.dm-empty p { margin: 0; font-size: 13px; }
+
+.dm-log-health { display: flex; align-items: center; gap: 6px; padding: 2px 0 8px; }
+.dm-log-circle { width: 22px; height: 22px; shape-rendering: auto; -webkit-font-smoothing: antialiased; }
+.dm-log-circle circle { shape-rendering: auto; }
+.dm-log-circle circle:last-child { transition: stroke-dashoffset 0.4s ease, stroke 0.3s; }
+.dm-log-circle.good circle:last-child { stroke: #22c55e; }
+.dm-log-circle.warn circle:last-child { stroke: #eab308; }
+.dm-log-circle.bad circle:last-child { stroke: #ef4444; }
+.dm-log-health-text { display: flex; flex-direction: column; }
+.dm-log-health-pct { font-size: 10px; font-weight: 700; }
+.dm-log-health-label { font-size: 11px; color: var(--text-dim); }
+
+.dm-log-list { max-height: 350px; overflow-y: auto; }
+.dm-log-entry { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; font-family: var(--font-mono, monospace); }
+.dm-log-time { color: var(--text-dim); white-space: nowrap; flex-shrink: 0; }
+.dm-log-badge { padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; text-transform: uppercase; white-space: nowrap; flex-shrink: 0; }
+.dm-log-badge.state_change { background: rgba(59,130,246,0.15); color: #60a5fa; }
+.dm-log-badge.error { background: rgba(239,68,68,0.15); color: #f87171; }
+.dm-log-badge.speed_sample { background: rgba(34,197,94,0.15); color: #4ade80; }
+.dm-log-badge.retry { background: rgba(234,179,8,0.15); color: #facc15; }
+.dm-log-badge.info { background: rgba(148,163,184,0.15); color: #94a3b8; }
+.dm-log-detail { color: var(--text-secondary); word-break: break-all; }
+
 .dm-footer { display: flex; justify-content: flex-end; padding: 12px 20px; border-top: 1px solid var(--border); flex-shrink: 0; }
 .dm-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--accent); color: #0a0e1a; border: none; font-weight: 700; padding: 10px 22px; border-radius: 10px; cursor: pointer; font-size: 13px; transition: all 0.15s ease; box-shadow: 0 2px 8px rgba(var(--accent-rgb),0.2); }
 .dm-btn i { font-size: 16px; }
@@ -5009,7 +5101,7 @@ input[type="number"] {
 
 .source-stack { display: flex; flex-direction: column; gap: 14px; }
 
-/* â”€â”€ Scroll to top â”€â”€ */
+/* â"€â"€ Scroll to top â"€â"€ */
 .scroll-top-btn {
   position: fixed; bottom: 24px; right: 24px; z-index: 500;
   width: 44px; height: 44px; border-radius: 50%;

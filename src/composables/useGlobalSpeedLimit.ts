@@ -63,6 +63,7 @@ export function useGlobalSpeedLimit() {
     isApplying,
     loaded,
     loadGlobalSpeedLimit,
+    setGlobalSpeedLimit,
     toggleGlobalSpeedLimit,
   }
 }

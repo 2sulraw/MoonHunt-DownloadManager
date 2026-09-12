@@ -59,6 +59,10 @@ fn hide_to_tray(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
+    // aria2c is spawned detached (no child handle is kept), so Tauri's exit
+    // does NOT terminate it. A surviving aria2c locks aria2c.exe in the
+    // install dir, which breaks in-app updates and uninstallation.
+    crate::aria2::kill_aria2c();
     app.exit(0);
 }
 
@@ -159,7 +163,7 @@ pub fn run() {
                 .icon(tray_icon)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "tray-open" => show_main_window(app),
-                    "tray-quit" => app.exit(0),
+                    "tray-quit" => quit_app(app.clone()),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| match event {
@@ -216,6 +220,7 @@ pub fn run() {
                 // so a stopped transfer is written to the DB exactly once. The DB —
                 // not the frontend — is the durable source for "was this completed".
                 let mut persisted_terminal: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut last_status: std::collections::HashMap<String, String> = std::collections::HashMap::new();
                 let mut poll_tick: u32 = 0;
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(1));
@@ -247,6 +252,21 @@ pub fn run() {
                     });
 
                     let cancelled_gids: Vec<String> = extension::cancelled_gids();
+
+                    // Record state-change events for the download log.
+                    for item in &result {
+                        if let Some(gid) = item.get("gid").and_then(|v| v.as_str()) {
+                            let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                            if let Some(prev) = last_status.get(gid) {
+                                if prev != status {
+                                    crate::db::insert_download_event(gid, "state_change", &format!("{} → {}", prev, status));
+                                }
+                            } else if !status.is_empty() {
+                                crate::db::insert_download_event(gid, "info", &format!("tracking started: {}", status));
+                            }
+                            last_status.insert(gid.to_string(), status.to_string());
+                        }
+                    }
 
                     // Persist completed/error transfers to the DB. This runs on
                     // the backend, so a download that finished (or failed) while
@@ -309,6 +329,7 @@ pub fn run() {
                             source: Some("aria2".to_string()),
                             ytdlp_token: None,
                             proxy: None,
+                            size_bytes: Some(total),
                         };
                         if crate::db::upsert_download(app_handle.clone(), record).is_ok() {
                             persisted.insert(gid.to_string());
@@ -378,6 +399,7 @@ pub fn run() {
                                 source: Some("aria2".to_string()),
                                 ytdlp_token: None,
                                 proxy: None,
+                                size_bytes: Some(total),
                             });
                         }
                     }
@@ -449,6 +471,7 @@ pub fn run() {
                                             source: row.get("source").and_then(|v| v.as_str()).map(|s| s.to_string()),
                                             ytdlp_token: row.get("ytdlp_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
                                             proxy: row.get("proxy").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                        size_bytes: None,
                                         };
                                         if crate::db::upsert_download(app_handle.clone(), healed).is_ok() {
                                             orphan_persisted.push(gid.to_string());
@@ -510,6 +533,7 @@ pub fn run() {
                                         source: row.get("source").and_then(|v| v.as_str()).map(|s| s.to_string()),
                                         ytdlp_token: row.get("ytdlp_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
                                         proxy: row.get("proxy").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                        size_bytes: None,
                                     };
                                     let _ = crate::db::upsert_download(app_handle.clone(), record);
                                     if effective_gid != gid {
@@ -532,6 +556,7 @@ pub fn run() {
                                         source: row.get("source").and_then(|v| v.as_str()).map(|s| s.to_string()),
                                         ytdlp_token: row.get("ytdlp_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
                                         proxy: row.get("proxy").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                        size_bytes: None,
                                     };
                                     if crate::db::upsert_download(app_handle.clone(), record).is_ok() {
                                         orphan_persisted.push(gid.to_string());
@@ -590,6 +615,24 @@ pub fn run() {
                         let _ = app_handle.emit("live-stats-changed", &payload);
                     }
 
+                    // Record speed samples every 5 seconds for active downloads.
+                    if include_stopped {
+                        for item in &result {
+                            let st = item.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                            if st != "active" { continue; }
+                            let Some(gid) = item.get("gid").and_then(|v| v.as_str()) else { continue };
+                            let speed = aria2_u64(item.get("downloadSpeed"));
+                            let connections = item.get("connections").and_then(|v| {
+                                v.as_str().and_then(|s| s.parse::<u32>().ok()).or_else(|| v.as_u64().map(|n| n as u32))
+                            }).unwrap_or(0);
+                            let total = aria2_u64(item.get("totalLength"));
+                            let completed = aria2_u64(item.get("completedLength"));
+                            let speed_str = crate::util::format_bytes(speed);
+                            let detail = format!("speed={}/s connections={} progress={}", speed_str, connections, if total > 0 { format!("{:.1}%", completed as f64 / total as f64 * 100.0) } else { "0%".into() });
+                            crate::db::insert_download_event(gid, "speed_sample", &detail);
+                        }
+                    }
+
                     // Skipping the stopped snapshot also means an empty result
                     // is just "nothing new" rather than a signal to clear the
                     // UI while completed downloads are temporarily unpolled.
@@ -636,6 +679,7 @@ pub fn run() {
                                     let total_len = item.get("totalLength").and_then(|t| t.as_str()).unwrap_or("0");
                                     let completed = item.get("completedLength").and_then(|c| c.as_str()).unwrap_or("0");
                                     println!("[aria2] Download {} failed: status={}, code={}, msg={}, completed={}/{}", gid, status, code, msg, completed, total_len);
+                                    crate::db::insert_download_event(gid, "error", &format!("[error {}] {}", code, msg));
                                     if let Some(files) = files {
                                         for f in files {
                                             if let Some(path) = f.get("path").and_then(|p| p.as_str()) {
@@ -756,6 +800,7 @@ pub fn run() {
             aria2::test_proxy_url,
             aria2::detect_system_proxy,
             aria2::reqwest_download,
+            aria2::get_download_events,
             extension::set_extension_settings,
             extension::open_chrome_extensions,
             db::save_all_settings,

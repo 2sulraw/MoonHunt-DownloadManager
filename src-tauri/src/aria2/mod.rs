@@ -4,7 +4,7 @@ mod client;
 mod process;
 
 pub use client::Aria2Client;
-pub use process::spawn_aria2;
+pub use process::{kill_aria2c, spawn_aria2};
 
 use crate::state::{
     db, lock, set_current_rpc_port, AppState, DownloadRecord, DownloadSchedule, PendingDownload,
@@ -300,6 +300,7 @@ pub async fn set_download_proxy(
             source: row.get("source").and_then(|v| v.as_str()).map(|s| s.to_string()),
             ytdlp_token: row.get("ytdlp_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
             proxy: stored,
+            size_bytes: None,
         };
         let _ = crate::db::upsert_download(app, record);
     }
@@ -333,7 +334,39 @@ pub async fn get_all_downloads() -> Result<Vec<Value>, String> {
 
 #[command]
 pub async fn get_download_details(gid: String) -> Result<Value, String> {
-    Aria2Client::new()?.tell_status(&gid).await
+    // Try aria2 first (works for active/waiting/recently-stopped downloads)
+    if let Ok(details) = Aria2Client::new()?.tell_status(&gid).await {
+        return Ok(details);
+    }
+    // Fallback: construct from DB for completed/failed downloads that aria2
+    // no longer remembers after restart.
+    let conn = db()?;
+    let mut stmt = conn
+        .prepare("SELECT filename, url, size, status, path, connections, size_bytes FROM downloads WHERE gid = ?1")
+        .map_err(|e| format!("DB query error: {}", e))?;
+    stmt.query_row([&gid], |row| {
+        let filename: String = row.get(0)?;
+        let url: String = row.get(1)?;
+        let size: String = row.get(2)?;
+        let status: String = row.get(3)?;
+        let path: Option<String> = row.get(4)?;
+        let connections: Option<i32> = row.get(5)?;
+        let size_bytes: Option<u64> = row.get(6)?;
+        let bytes = size_bytes.unwrap_or(0);
+        let bytes_str = if bytes > 0 { bytes.to_string() } else { String::new() };
+        Ok(serde_json::json!({
+            "status": status,
+            "totalLength": if bytes > 0 { bytes.to_string() } else { size },
+            "completedLength": if bytes > 0 && status == "complete" { bytes.to_string() } else { String::new() },
+            "connections": connections.map(|c| c.to_string()).unwrap_or_default(),
+            "files": [{
+                "path": path.unwrap_or_default(),
+                "length": bytes_str.clone(),
+                "completedLength": if status == "complete" { bytes_str } else { String::new() },
+                "uris": [{ "uri": url, "status": "used" }]
+            }]
+        }))
+    }).map_err(|e| format!("Download not found: {}", e))
 }
 
 #[command]
@@ -369,7 +402,14 @@ pub async fn pause_all_downloads() -> Result<String, String> {
     Ok(format!("Paused {} downloads", paused))
 }
 
-fn default_add_options(filename: &str, connections: u32, dir: Option<&str>) -> Map<String, Value> {
+fn default_add_options(
+    filename: &str,
+    connections: u32,
+    dir: Option<&str>,
+    max_retries: u32,
+    retry_per_uri: u32,
+    retry_wait: u32,
+) -> Map<String, Value> {
     let mut options = Map::new();
     options.insert("out".to_string(), json!(filename));
     options.insert("split".to_string(), json!(connections.to_string()));
@@ -377,10 +417,14 @@ fn default_add_options(filename: &str, connections: u32, dir: Option<&str>) -> M
     options.insert("min-split-size".to_string(), json!("1M"));
     options.insert("allow-overwrite".to_string(), json!("false"));
     options.insert("auto-file-renaming".to_string(), json!("true"));
-    // Retry settings — prevent single-connection failures from killing the download
-    options.insert("max-tries".to_string(), json!("5"));
-    options.insert("retry".to_string(), json!("3"));
-    options.insert("retry-wait".to_string(), json!("3"));
+    // Retry settings — critical for unstable connections. aria2 uses TWO
+    // different retry knobs and both matter:
+    //   --max-tries (N): per-task hard ceiling (aria2 default: 5)
+    //   --retry (N):     per-URI retries before trying next URI
+    //                     (aria2 default: 1 — with 1 URL that means 1 attempt)
+    options.insert("max-tries".to_string(), json!(max_retries.to_string()));
+    options.insert("retry".to_string(), json!(retry_per_uri.to_string()));
+    options.insert("retry-wait".to_string(), json!(retry_wait.to_string()));
     options.insert("timeout".to_string(), json!("120"));
     options.insert("connect-timeout".to_string(), json!("60"));
     options.insert("socket-timeout".to_string(), json!("120"));
@@ -390,6 +434,17 @@ fn default_add_options(filename: &str, connections: u32, dir: Option<&str>) -> M
         }
     }
     options
+}
+
+/// Build the options map for addDownload/confirmDownloadAction by loading
+/// retry settings from the DB and delegating to `default_add_options`.
+fn build_download_options(
+    filename: &str,
+    connections: u32,
+    dir: Option<&str>,
+) -> Map<String, Value> {
+    let s = crate::db::load_settings_from_db().unwrap_or_default();
+    default_add_options(filename, connections, dir, s.max_retries, s.retry_per_uri, s.retry_wait)
 }
 
 /// Inject per-download proxy options into an aria2 addUri/addTorrent options map.
@@ -481,7 +536,7 @@ pub async fn add_download(
         download_url, filename, connections, is_duplicate
     );
 
-    let mut options = default_add_options(&filename, connections, Some(&effective_dir));
+    let mut options = build_download_options(&filename, connections, Some(&effective_dir));
     let proxy_db = apply_per_download_proxy(&mut options, proxy.as_ref());
     if let Some(p) = &proxy_db {
         println!("[~] Per-download proxy set: {}", p);
@@ -511,6 +566,7 @@ pub async fn add_download(
         source: Some("aria2".to_string()),
         ytdlp_token: None,
         proxy: proxy_db.clone(),
+        size_bytes: None,
     };
     if let Err(e) = crate::db::upsert_download(app, record) {
         println!("[!] Failed to persist new download record: {}", e);
@@ -799,7 +855,7 @@ pub async fn confirm_download_action(
         .map_err(|e| format!("Failed to create download folder: {}", e))?;
 
     // Merge headers from the browser extension
-    let mut options = default_add_options(&filename, connections, Some(&effective_dir));
+    let mut options = build_download_options(&filename, connections, Some(&effective_dir));
     let proxy_db = apply_per_download_proxy(&mut options, proxy.as_ref());
     if let Some(p) = &proxy_db {
         println!("[confirm_download_action] Per-download proxy set: {}", p);
@@ -840,8 +896,7 @@ pub async fn confirm_download_action(
     let client = Aria2Client::new()?;
 
     println!("[>] Adding download from extension: {} as {}", download_url, filename);
-    let gid = client.add_uri(&[download_url], options.clone()).await?;
-    let _ = client.change_option(&gid, options).await;
+    let gid = client.add_uri(&[download_url], options).await?;
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -860,6 +915,7 @@ pub async fn confirm_download_action(
         source: Some("aria2".to_string()),
         ytdlp_token: None,
         proxy: proxy_db,
+        size_bytes: None,
     };
     if let Err(e) = crate::db::upsert_download(app, record) {
         println!("[!] Failed to persist confirm download record: {}", e);
@@ -1502,8 +1558,14 @@ pub async fn reqwest_download(
         source: Some("reqwest".to_string()),
         ytdlp_token: None,
         proxy: None,
+            size_bytes: None,
     };
     let _ = crate::db::upsert_download(app, record);
 
     Ok(downloaded.to_string())
+}
+
+#[command]
+pub async fn get_download_events(gid: String) -> Result<Vec<serde_json::Value>, String> {
+    crate::db::get_download_events(&gid)
 }

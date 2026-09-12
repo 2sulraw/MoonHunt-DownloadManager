@@ -124,6 +124,40 @@
         </div>
 
         <div class="field">
+          <label>{{ t('Retry Settings') }}</label>
+          <p class="field-hint">{{ t('How aria2 retries on unstable connections.') }}</p>
+        </div>
+
+        <div class="retry-row">
+          <div class="retry-field">
+            <label>{{ t('Max Tries') }}</label>
+            <div class="stepper">
+              <button @click="maxRetries = Math.max(1, maxRetries - 1)" :disabled="maxRetries <= 1"><i class="material-icons">remove</i></button>
+              <input v-model.number="maxRetries" type="number" min="1" max="999" @change="maxRetries = Math.min(999, Math.max(1, Number(maxRetries) || 5))" />
+              <button @click="maxRetries = Math.min(999, maxRetries + 1)" :disabled="maxRetries >= 999"><i class="material-icons">add</i></button>
+            </div>
+          </div>
+
+          <div class="retry-field">
+            <label>{{ t('Retry per URI') }}</label>
+            <div class="stepper">
+              <button @click="retryPerUri = Math.max(1, retryPerUri - 1)" :disabled="retryPerUri <= 1"><i class="material-icons">remove</i></button>
+              <input v-model.number="retryPerUri" type="number" min="1" max="999" @change="retryPerUri = Math.min(999, Math.max(1, Number(retryPerUri) || 1))" />
+              <button @click="retryPerUri = Math.min(999, retryPerUri + 1)" :disabled="retryPerUri >= 999"><i class="material-icons">add</i></button>
+            </div>
+          </div>
+
+          <div class="retry-field">
+            <label>{{ t('Retry Wait (sec)') }}</label>
+            <div class="stepper">
+              <button @click="retryWait = Math.max(1, retryWait - 1)" :disabled="retryWait <= 1"><i class="material-icons">remove</i></button>
+              <input v-model.number="retryWait" type="number" min="1" max="120" @change="retryWait = Math.min(120, Math.max(1, Number(retryWait) || 3))" />
+              <button @click="retryWait = Math.min(120, retryWait + 1)" :disabled="retryWait >= 120"><i class="material-icons">add</i></button>
+            </div>
+          </div>
+        </div>
+
+        <div class="field">
           <div class="toggle-header-row">
             <label>{{ t('Enable Download Limit') }}</label>
             <div class="speed-toggle-row">
@@ -1085,6 +1119,33 @@ select option {
 
 .stepper input:focus {
   box-shadow: none;
+}
+
+.retry-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.retry-row .retry-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.retry-row .retry-field label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.retry-row .stepper {
+  width: fit-content;
+}
+
+.retry-row .stepper input {
+  width: 50px;
+  text-align: center;
 }
 
 .toggle-header-row {
@@ -2299,6 +2360,9 @@ const notify = inject<(msg: string, type: 'success' | 'error' | 'info') => void>
 
 const downloadLocation = ref('')
 const maxConcurrent = ref(5)
+const maxRetries = ref(5)
+const retryPerUri = ref(3)
+const retryWait = ref(3)
 const maxDownloadSpeed = ref(0)
 const speedLimitUnit = ref<'KB' | 'MB' | 'GB'>('KB')
 const speedLimitInputValue = ref(0)
@@ -2713,6 +2777,9 @@ async function testProxyConnection() {
 const DEFAULT_SETTINGS = {
   downloadLocation: '',  // set dynamically from backend
   maxConcurrent: 5,
+  maxRetries: 5,
+  retryPerUri: 3,
+  retryWait: 3,
   maxDownloadSpeed: 0,
   globalSpeedLimitEnabled: false,
   verifySsl: true,
@@ -2752,6 +2819,9 @@ async function loadSettings() {
     if (saved) {
       downloadLocation.value = saved.downloadLocation || DEFAULT_SETTINGS.downloadLocation
       maxConcurrent.value = saved.maxConcurrent ?? DEFAULT_SETTINGS.maxConcurrent
+      maxRetries.value = saved.maxRetries ?? DEFAULT_SETTINGS.maxRetries
+      retryPerUri.value = saved.retryPerUri ?? DEFAULT_SETTINGS.retryPerUri
+      retryWait.value = saved.retryWait ?? DEFAULT_SETTINGS.retryWait
       maxDownloadSpeed.value = saved.maxDownloadSpeed ?? DEFAULT_SETTINGS.maxDownloadSpeed
       speedLimitEnabled.value = saved.globalSpeedLimitEnabled ?? maxDownloadSpeed.value > 0
       globalSpeedLimit.globalSpeedLimitEnabled.value = speedLimitEnabled.value
@@ -2861,6 +2931,9 @@ async function saveSettings() {
     language: language.value,
     downloadLocation: downloadLocation.value,
     maxConcurrent: maxConcurrent.value,
+    maxRetries: maxRetries.value,
+    retryPerUri: retryPerUri.value,
+    retryWait: retryWait.value,
     maxDownloadSpeed: maxDownloadSpeed.value,
     globalSpeedLimitEnabled: speedLimitEnabled.value,
     verifySsl: verifySsl.value,
@@ -2961,7 +3034,7 @@ async function applyRuntimeSettings(existingSettings: Partial<Settings>, setting
 
   const aria2Affecting: (keyof Settings)[] = [
     'downloadLocation', 'maxConcurrent', 'maxDownloadSpeed',
-    'globalSpeedLimitEnabled',
+    'globalSpeedLimitEnabled', 'verifySsl',
     'proxyType', 'proxyHost', 'proxyPort', 'proxyUser', 'proxyPass', 'rpcPort',
   ]
   const speedAffecting: (keyof Settings)[] = ['maxDownloadSpeed', 'globalSpeedLimitEnabled']

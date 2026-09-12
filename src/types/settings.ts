@@ -2,6 +2,9 @@
 export interface Settings {
   downloadLocation: string
   maxConcurrent: number
+  maxRetries?: number
+  retryPerUri?: number
+  retryWait?: number
   maxDownloadSpeed: number
   globalSpeedLimitEnabled?: boolean
   jsRuntime?: string

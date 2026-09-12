@@ -43,6 +43,11 @@
 
         <p v-if="installError" class="um-error">{{ installError }}</p>
 
+        <div v-if="update?.body" class="um-changelog-section">
+          <h4 class="um-changelog-title">{{ t('Changelog') }}</h4>
+          <div class="um-changelog-body">{{ update.body }}</div>
+        </div>
+
         <button type="button" class="um-changelog" @click="openChangelog">
           <i class="material-icons">open_in_new</i>
           {{ t('View changelog on GitHub') }}
@@ -63,6 +68,7 @@ interface UpdateInfo {
   version?: string
   url?: string
   assetUrl?: string
+  body?: string
 }
 
 const props = defineProps<{ visible: boolean; update?: UpdateInfo | null }>()
@@ -299,6 +305,10 @@ function openChangelog() {
   font-size: 12px;
   line-height: 1.45;
 }
+
+.um-changelog-section { margin-top: 12px; width: 100%; }
+.um-changelog-title { font-size: 12px; font-weight: 600; color: var(--text); margin: 0 0 6px; }
+.um-changelog-body { font-size: 12px; color: var(--text-dim); white-space: pre-wrap; max-height: 160px; overflow-y: auto; padding: 10px; background: var(--hover-bg); border-radius: 8px; line-height: 1.5; }
 
 .um-changelog {
   margin-top: 16px;

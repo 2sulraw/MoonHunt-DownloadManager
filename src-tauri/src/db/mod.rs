@@ -116,6 +116,7 @@ pub fn check_download_file_states(
                 source: row.get("source").and_then(|v| v.as_str()).map(|s| s.to_string()),
                 ytdlp_token: row.get("ytdlp_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
                 proxy: row.get("proxy").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                size_bytes: None,
             };
             upsert_download(app.clone(), record)?;
         }
@@ -293,6 +294,24 @@ pub fn init_db(app: &tauri::AppHandle) -> Result<(), String> {
         [],
     ).map_err(|e| format!("Failed to create schedules table: {}", e))?;
 
+    // Create download_events table for per-download activity log
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS download_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gid TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            detail TEXT
+        )",
+        [],
+    ).map_err(|e| format!("Failed to create download_events table: {}", e))?;
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_events_gid_ts ON download_events(gid, timestamp)", []);
+
+    // Migration: add size_bytes column for raw byte counts
+    if !cols.iter().any(|c| c == "size_bytes") {
+        let _ = conn.execute("ALTER TABLE downloads ADD COLUMN size_bytes INTEGER", []);
+    }
+
     DB.set(Mutex::new(conn)).map_err(|_| "Database already initialized".to_string())?;
     Ok(())
 }
@@ -454,8 +473,8 @@ pub fn upsert_download(_app: tauri::AppHandle, record: DownloadRecord) -> Result
     let conn = db()?;
     
     conn.execute(
-        "INSERT INTO downloads (gid, filename, url, size, status, progress, added_at, path, connections, source, ytdlp_token, proxy)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        "INSERT INTO downloads (gid, filename, url, size, status, progress, added_at, path, connections, source, ytdlp_token, proxy, size_bytes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(gid) DO UPDATE SET
            filename = excluded.filename,
            url = excluded.url,
@@ -470,7 +489,8 @@ pub fn upsert_download(_app: tauri::AppHandle, record: DownloadRecord) -> Result
            connections = excluded.connections,
            source = excluded.source,
            ytdlp_token = excluded.ytdlp_token,
-           proxy = excluded.proxy",
+           proxy = excluded.proxy,
+           size_bytes = COALESCE(excluded.size_bytes, downloads.size_bytes)",
         rusqlite::params![
             record.gid,
             record.filename,
@@ -484,6 +504,7 @@ pub fn upsert_download(_app: tauri::AppHandle, record: DownloadRecord) -> Result
             record.source,
             record.ytdlp_token,
             record.proxy,
+            record.size_bytes,
         ],
     ).map_err(|e| format!("Insert error: {}", e))?;
     
@@ -667,5 +688,40 @@ pub fn get_due_schedules() -> Result<Vec<DownloadSchedule>, String> {
     .collect();
 
     Ok(schedules)
+}
+
+// ── Download event log ───────────────────────────────────────────
+
+pub fn insert_download_event(gid: &str, event_type: &str, detail: &str) {
+    let Ok(conn) = db() else { return };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let _ = conn.execute(
+        "INSERT INTO download_events (gid, timestamp, event_type, detail) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![gid, now_ms, event_type, detail],
+    );
+}
+
+pub fn get_download_events(gid: &str) -> Result<Vec<serde_json::Value>, String> {
+    let conn = db()?;
+    let mut stmt = conn
+        .prepare("SELECT id, gid, timestamp, event_type, detail FROM download_events WHERE gid = ?1 ORDER BY timestamp ASC")
+        .map_err(|e| format!("Failed to query events: {}", e))?;
+    let rows = stmt
+        .query_map([gid], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, i64>(0)?,
+                "gid": row.get::<_, String>(1)?,
+                "timestamp": row.get::<_, i64>(2)?,
+                "eventType": row.get::<_, String>(3)?,
+                "detail": row.get::<_, Option<String>>(4)?,
+            }))
+        })
+        .map_err(|e| format!("Failed to query events: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
 }
 

@@ -399,6 +399,7 @@ fn persist_complete(
         source: Some("yt-dlp".to_string()),
         ytdlp_token: Some(ytdlp_token.to_string()),
         proxy: None,
+        size_bytes: None,
     };
     crate::db::upsert_download(app.clone(), record)?;
     let _ = app.emit(
@@ -439,6 +440,7 @@ fn persist_error(
         source: Some("yt-dlp".to_string()),
         ytdlp_token: None,
         proxy: None,
+        size_bytes: None,
     };
     if let Err(e) = crate::db::upsert_download(app.clone(), record) {
         println!("[!] Failed to persist yt-dlp error record: {}", e);
@@ -562,6 +564,7 @@ fn update_yt_progress(
         source: Some("yt-dlp".to_string()),
         ytdlp_token: Some(ytdlp_token.to_string()),
         proxy: None,
+        size_bytes: None,
     };
     if persist {
         if let Err(e) = crate::db::upsert_download(app.clone(), record) {
@@ -1734,6 +1737,7 @@ pub async fn add_yt_download(
                     source: Some("yt-dlp".to_string()),
                     ytdlp_token: Some(ytdlp_token.clone()),
                     proxy: None,
+        size_bytes: None,
                 };
                 if let Err(e) = crate::db::upsert_download(app.clone(), active_record) {
                     println!(
@@ -1868,6 +1872,7 @@ pub async fn add_yt_download(
                 source: Some("yt-dlp".to_string()),
                 ytdlp_token: Some(ytdlp_token.clone()),
                 proxy: None,
+        size_bytes: None,
             };
             if let Err(e) = crate::db::upsert_download(app.clone(), upsert_record) {
                 println!(

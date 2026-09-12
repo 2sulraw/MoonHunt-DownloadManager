@@ -5,7 +5,8 @@ use crate::state::{
 };
 use crate::util::cmd_no_window;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::command;
 use tauri::Manager;
@@ -36,6 +37,18 @@ pub fn cancelled_gids() -> Vec<String> {
         .lock()
         .map(|s| s.iter().cloned().collect())
         .unwrap_or_default()
+}
+
+// ─── Dedup registry ──────────────────────────────────────────────
+// Chrome can fire the download event twice for a single user action.
+// Reject duplicate POST /download requests for the same URL within a
+// short window so they never reach the pending queue.
+
+type RecentDownloads = Arc<Mutex<HashMap<String, Instant>>>;
+static RECENT: OnceLock<RecentDownloads> = OnceLock::new();
+
+fn recent_downloads() -> &'static RecentDownloads {
+    RECENT.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
 pub fn write_netscape_cookies(cookies: &[ExtensionCookie]) -> Result<String, String> {
@@ -319,25 +332,44 @@ pub fn start_http_server(
                                         "[HTTP] POST /download: url={}, filename={}, headers={:?}",
                                         download.url, download.filename, download.headers
                                     );
-                                    {
-                                        let mut guard = pending.lock().unwrap_or_else(|e| e.into_inner());
-                                        guard.push(download.clone());
-                                    }
-                                    // Tell the frontend immediately instead of making it poll the
-                                    // backend every few hundred milliseconds while idle.
-                                    let _ = app_handle.emit("pending-download", &download);
 
-                                    // A download request arrived — surface the app window so the
-                                    // user sees the download being handled.
-                                    {
-                                        let app = app_handle.clone();
-                                        std::thread::spawn(move || {
-                                            if let Some(window) = app.get_webview_window("main") {
-                                                let _ = window.unminimize();
-                                                let _ = window.show();
-                                                let _ = window.set_focus();
-                                            }
-                                        });
+                                    // Dedup: Chrome can fire the download event twice for
+                                    // a single click. Drop duplicates within 5 seconds.
+                                    let is_dup = {
+                                        let mut recent = recent_downloads().lock().unwrap_or_else(|e| e.into_inner());
+                                        let now = Instant::now();
+                                        recent.retain(|_, t| now.duration_since(*t).as_secs() < 5);
+                                        // Cap map size so stale entries can't grow unbounded.
+                                        if recent.len() >= 1000 {
+                                            recent.clear();
+                                        }
+                                        if recent.contains_key(&download.url) {
+                                            true
+                                        } else {
+                                            recent.insert(download.url.clone(), now);
+                                            false
+                                        }
+                                    };
+
+                                    if !is_dup {
+                                        {
+                                            let mut guard = pending.lock().unwrap_or_else(|e| e.into_inner());
+                                            guard.push(download.clone());
+                                        }
+                                        let _ = app_handle.emit("pending-download", &download);
+
+                                        {
+                                            let app = app_handle.clone();
+                                            std::thread::spawn(move || {
+                                                if let Some(window) = app.get_webview_window("main") {
+                                                    let _ = window.unminimize();
+                                                    let _ = window.show();
+                                                    let _ = window.set_focus();
+                                                }
+                                            });
+                                        }
+                                    } else {
+                                        println!("[HTTP] POST /download: duplicate suppressed for {}", download.url);
                                     }
 
                                     let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";

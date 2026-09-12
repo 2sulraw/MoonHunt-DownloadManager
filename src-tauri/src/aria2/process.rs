@@ -66,6 +66,13 @@ fn build_aria2_args(
         "--continue=true".to_string(),
     ];
 
+    // Wire the "Verify Certificates" toggle to aria2c.
+    // When disabled, skip the OCSP/CRL revocation check that fails instantly
+    // on unstable connections (SChannel error 80092013).
+    if !settings.verify_ssl {
+        args.push("--check-certificate=false".to_string());
+    }
+
     // aria2 rejects `--rpc-secret=` (empty string) and exits — only pass the
     // flag when a non-empty token is configured.
     if !ARIA2_RPC_TOKEN.is_empty() {

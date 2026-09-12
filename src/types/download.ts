@@ -54,3 +54,12 @@ export function normalizeStatus(raw: string | undefined | null): DownloadStatus 
   }
   return 'unknown'
 }
+
+/** A single event in a download's activity log. */
+export interface DownloadEvent {
+  id: number
+  gid: string
+  timestamp: number
+  eventType: 'state_change' | 'error' | 'speed_sample' | 'retry' | 'info'
+  detail: string | null
+}

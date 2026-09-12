@@ -87,9 +87,9 @@ const { onLimitReached, loadLimitSettings, resetLimit, startPeriodicPersist, sto
 const showAboutModal = ref(false)
 const showUpdateModal = ref(false)
 const updateAvailable = ref(false)
-const updateInfo = ref<{ version?: string; url?: string; assetUrl?: string } | null>(null)
+const updateInfo = ref<{ version?: string; url?: string; assetUrl?: string; body?: string } | null>(null)
 
-function onUpdateAvailable(info: { version?: string; url?: string; assetUrl?: string }) {
+function onUpdateAvailable(info: { version?: string; url?: string; assetUrl?: string; body?: string }) {
   updateInfo.value = info
   showAboutModal.value = false
   showUpdateModal.value = true
@@ -236,8 +236,22 @@ function setupWindowTorrentDrop() {
   })
 }
 
-function handleClipboardDownload(url: string) {
-  downloadDialog.value?.openDialog(url, '', '', undefined)
+async function handleClipboardDownload(url: string) {
+  if (!downloadDialog.value) return
+  try {
+    const result = await downloadDialog.value.openDialog(url, '', '', undefined)
+    if (result?.accepted) {
+      await invoke<string>('confirm_download_action', {
+        url, filename: result.filename || '',
+        connections: result.connections || 1,
+        dir: result.filePath || undefined,
+        proxy: result.proxy || null,
+      })
+      notify(`${t('Download added')}: ${result.filename || url}`, 'success')
+    }
+  } catch (e) {
+    notify(`${t('Failed to start download')}: ${e}`, 'error')
+  }
 }
 
 function handleNewDownload() {
@@ -302,7 +316,7 @@ const checkPendingDownloads = async () => {
         processingPending = true
         rememberRequestedConnections(dl.url, result.connections || 1)
         try {
-          await invoke('confirm_download_action', {
+          const gid = await invoke<string>('confirm_download_action', {
             url: dl.url, filename: result.filename || dl.filename,
             connections: result.connections || 1, dir: result.filePath || undefined,
             headers: dl.headers || undefined,
@@ -310,14 +324,8 @@ const checkPendingDownloads = async () => {
           })
           if (result.schedule) {
             try {
-              const addResult = await invoke<string>('confirm_download_action', {
-                url: dl.url, filename: result.filename || dl.filename,
-                connections: result.connections || 1, dir: result.filePath || undefined,
-                proxy: result.proxy || null,
-              })
-              const parsed = typeof addResult === 'string' ? JSON.parse(addResult) : addResult
               await invoke('create_schedule', {
-                schedule: { downloadGid: (parsed as Record<string, unknown>)?.gid || null, url: dl.url, filename: result.filename || dl.filename, ...result.schedule }
+                schedule: { downloadGid: gid || null, url: dl.url, filename: result.filename || dl.filename, ...result.schedule }
               })
             } catch { /* schedule failed but download added */ }
           }
@@ -363,10 +371,10 @@ onMounted(async () => {
   })()
 
   // One-shot update check on launch; badge appears in the titlebar if newer.
-  invoke<{ status: string; version?: string; url?: string; assetUrl?: string }>('check_for_update').then((res) => {
+  invoke<{ status: string; version?: string; url?: string; assetUrl?: string; body?: string }>('check_for_update').then((res) => {
     if (res.status === 'available') {
       updateAvailable.value = true
-      updateInfo.value = { version: res.version, url: res.url, assetUrl: res.assetUrl }
+      updateInfo.value = { version: res.version, url: res.url, assetUrl: res.assetUrl, body: res.body }
     }
   }).catch(() => {})
 

@@ -47,6 +47,15 @@ pub struct ProxySettings {
     pub verify_ssl: bool,
     #[serde(default)]
     pub delete_file_on_cancel: bool,
+    /// aria2: max-tries per task (global ceiling). Default 5.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    /// aria2: --retry per-URI retries before trying the next URI (default 1).
+    #[serde(default = "default_retry_per_uri")]
+    pub retry_per_uri: u32,
+    /// aria2: --retry-wait seconds between retries (default 3).
+    #[serde(default = "default_retry_wait")]
+    pub retry_wait: u32,
     #[serde(default)]
     pub debug_logging: bool,
     #[serde(default)]
@@ -74,6 +83,10 @@ fn default_download_limit_unit() -> String {
 }
 
 fn default_language() -> String { "en".to_string() }
+
+fn default_max_retries() -> u32 { 5 }
+fn default_retry_per_uri() -> u32 { 3 }
+fn default_retry_wait() -> u32 { 3 }
 
 impl Default for ProxySettings {
     fn default() -> Self {
@@ -104,6 +117,9 @@ impl Default for ProxySettings {
             download_limit_unit: "MB".to_string(),
             verify_ssl: true,
             delete_file_on_cancel: false,
+            max_retries: 5,
+            retry_per_uri: 3,
+            retry_wait: 3,
             debug_logging: false,
             disable_hardware_acceleration: false,
             torrent_download_location: None,
@@ -211,6 +227,8 @@ pub struct DownloadRecord {
     pub source: Option<String>,
     pub ytdlp_token: Option<String>,
     pub proxy: Option<String>,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
 }
 
 /// Per-download proxy override passed when starting a single download.

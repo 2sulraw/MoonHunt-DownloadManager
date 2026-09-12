@@ -69,7 +69,7 @@ import { LogoGithub } from '@vicons/ionicons5'
 import { useOverlayClose } from '../composables/useOverlayClose'
 import { useI18n } from '../i18n'
 defineProps<{ visible: boolean }>()
-const emit = defineEmits<{ close: []; 'update-available': [info: { version?: string; url?: string; assetUrl?: string }] }>()
+const emit = defineEmits<{ close: []; 'update-available': [info: { version?: string; url?: string; assetUrl?: string; body?: string }] }>()
 
 const { overlayPress, overlayCancel, overlayRelease } = useOverlayClose()
 const { t } = useI18n()
@@ -90,10 +90,10 @@ async function checkUpdate() {
   if (check.value.status === 'checking') return
   check.value = { status: 'checking' }
   try {
-    const res = await invoke<{ status: CheckStatus; version?: string; url?: string; assetUrl?: string }>('check_for_update')
+    const res = await invoke<{ status: CheckStatus; version?: string; url?: string; assetUrl?: string; body?: string }>('check_for_update')
     check.value = { status: res.status, version: res.version, url: res.url }
     if (res.status === 'available') {
-      emit('update-available', { version: res.version, url: res.url, assetUrl: res.assetUrl })
+      emit('update-available', { version: res.version, url: res.url, assetUrl: res.assetUrl, body: res.body })
     }
   } catch (e) {
     check.value = { status: 'error', error: typeof e === 'string' ? e : t('Could not check for updates') }
@@ -102,7 +102,7 @@ async function checkUpdate() {
 
 function openUpdate() {
   if (check.value.url) {
-    invoke('open_external', { url: check.value.url }).catch(() => {})
+    emit('update-available', { version: check.value.version, url: check.value.url })
   }
 }
 

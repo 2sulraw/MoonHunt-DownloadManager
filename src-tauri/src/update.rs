@@ -16,7 +16,7 @@ const RELEASES_API: &str =
 pub enum UpdateStatus {
     UpToDate,
     #[serde(rename_all = "camelCase")]
-    Available { version: String, url: String, asset_url: String },
+    Available { version: String, url: String, asset_url: String, body: String },
     NoReleases,
     #[serde(rename_all = "camelCase")]
     Error { message: String },
@@ -86,10 +86,12 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<UpdateStatus, Str
             .unwrap_or("")
             .to_string();
         let asset_url = exe_asset_url(&body);
+        let release_body = body.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string();
         Ok(UpdateStatus::Available {
             version: tag.to_string(),
             url,
             asset_url,
+            body: release_body,
         })
     } else {
         Ok(UpdateStatus::UpToDate)
@@ -218,6 +220,10 @@ pub async fn install_update(app: tauri::AppHandle, asset_url: String) -> Result<
     }
     let handle = app.clone();
     std::thread::spawn(move || {
+        // Kill aria2c BEFORE exiting: the installer's app-running check only
+        // looks for moonhunt.exe, and a live aria2c keeps locking
+        // $INSTDIR\aria2c.exe, which makes the update fail to replace files.
+        crate::aria2::kill_aria2c();
         std::thread::sleep(Duration::from_millis(2500));
         handle.exit(0);
     });
@@ -284,6 +290,7 @@ mod tests {
             version: "v0.1.5".into(),
             url: "https://x".into(),
             asset_url: "https://a/exe".into(),
+            body: "## Changes\n- Fixed bug".into(),
         };
         let s = serde_json::to_value(&v).unwrap();
         // enum-level rename_all camelCases the variant tag; the per-variant
