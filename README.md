@@ -1,6 +1,7 @@
 # MoonHunt
 
 ![Total Downloads](https://img.shields.io/github/downloads/2sulraw/MoonHunt-DownloadManager/total)
+![GitHub Release](https://img.shields.io/github/v/release/2sulraw/MoonHunt-DownloadManager)
 
 A desktop download manager built with [Tauri 2](https://v2.tauri.app/),
 [Vue 3](https://vuejs.org/), and [aria2](https://aria2.github.io/).
