@@ -94,24 +94,64 @@ pub async fn set_extension_settings(
 #[command]
 pub async fn open_chrome_extensions() -> Result<String, String> {
     use std::path::PathBuf;
-    let mut chrome_paths = vec![
-        PathBuf::from("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"),
-        PathBuf::from("C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"),
+
+    // Build platform-specific candidate browser paths.
+    #[cfg(target_os = "windows")]
+    let browser_paths = {
+        let mut paths = vec![
+            PathBuf::from("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"),
+            PathBuf::from("C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"),
+        ];
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            paths.push(
+                PathBuf::from(local_app_data)
+                    .join("Google")
+                    .join("Chrome")
+                    .join("Application")
+                    .join("chrome.exe"),
+            );
+        }
+        paths
+    };
+
+    #[cfg(target_os = "macos")]
+    let browser_paths = vec![
+        PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        PathBuf::from("/Applications/Chromium.app/Contents/MacOS/Chromium"),
     ];
 
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        chrome_paths.push(
-            PathBuf::from(local_app_data)
-                .join("Google")
-                .join("Chrome")
-                .join("Application")
-                .join("chrome.exe"),
-        );
-    }
+    #[cfg(target_os = "linux")]
+    let browser_paths = {
+        let mut paths = vec![];
+        // User-level config dirs first (most common for Linux installs)
+        if let Some(home) = dirs::home_dir() {
+            paths.push(home.join(".config/google-chrome/chrome"));
+            paths.push(home.join(".config/chromium/chromium"));
+        }
+        // System-wide binaries
+        for bin in &[
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+        ] {
+            if let Some(p) = which_binary(bin) {
+                paths.push(p);
+            }
+        }
+        // Snap-packaged browsers
+        for snap in &["/snap/bin/chromium", "/snap/bin/google-chrome"] {
+            let p = PathBuf::from(snap);
+            if p.exists() {
+                paths.push(p);
+            }
+        }
+        paths
+    };
 
-    for chrome_path in chrome_paths {
-        if chrome_path.exists() {
-            cmd_no_window(&chrome_path.to_string_lossy())
+    for browser_path in &browser_paths {
+        if browser_path.exists() {
+            cmd_no_window(&browser_path.to_string_lossy())
                 .arg("--profile-directory=Default")
                 .arg("--new-window")
                 .arg("chrome://extensions")
@@ -121,25 +161,60 @@ pub async fn open_chrome_extensions() -> Result<String, String> {
         }
     }
 
-    cmd_no_window("cmd")
-        .args([
-            "/C",
-            "start",
-            "",
-            "chrome",
-            "--profile-directory=Default",
-            "--new-window",
-            "chrome://extensions",
-        ])
-        .spawn()
-        .map_err(|e| {
-            format!(
-                "Chrome executable not found and Windows fallback failed: {}",
-                e
-            )
-        })?;
+    // Fallback: on Windows use `cmd /C start chrome`, on Linux use `xdg-open`.
+    #[cfg(target_os = "windows")]
+    {
+        cmd_no_window("cmd")
+            .args([
+                "/C",
+                "start",
+                "",
+                "chrome",
+                "--profile-directory=Default",
+                "--new-window",
+                "chrome://extensions",
+            ])
+            .spawn()
+            .map_err(|e| {
+                format!(
+                    "Chrome executable not found and Windows fallback failed: {}",
+                    e
+                )
+            })?;
+        Ok("Opened Chrome Extensions page".to_string())
+    }
 
-    Ok("Opened Chrome Extensions page".to_string())
+    #[cfg(not(target_os = "windows"))]
+    {
+        // On Linux/macOS, open chrome://extensions in the default browser.
+        // This may not always work for chrome:// URLs in non-Chrome browsers,
+        // but it's the best fallback when no Chrome/Chromium binary was found.
+        cmd_no_window("xdg-open")
+            .arg("chrome://extensions")
+            .spawn()
+            .or_else(|_| cmd_no_window("open").arg("chrome://extensions").spawn())
+            .map_err(|e| format!("Failed to open extensions page: {}", e))?;
+        Ok("Opened extensions page in default browser".to_string())
+    }
+}
+
+/// Helper: find a binary on PATH using `which`.
+#[cfg(target_os = "linux")]
+fn which_binary(name: &str) -> Option<std::path::PathBuf> {
+    std::process::Command::new("which")
+        .arg(name)
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !path.is_empty() {
+                    let p = std::path::PathBuf::from(path);
+                    if p.exists() { return Some(p); }
+                }
+            }
+            None
+        })
 }
 
 

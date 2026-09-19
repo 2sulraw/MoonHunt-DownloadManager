@@ -41,6 +41,7 @@ test-*.js
 
 # Editor directories and files
 .vscode/*
+.vs/
 
 .idea
 .DS_Store
@@ -68,3 +69,12 @@ UI-UX-DESIGN-REFERENCE.md
 cbm-readme.md
 scratch.py
 fix_tags.py
+
+# makepkg working dirs and packages (note: the Vue frontend lives in
+# src/, so only ignore makepkg's own junk inside it)
+pkg/
+src/MoonHunt-*/
+src/cargo-home/
+src/npm-cache/
+*.pkg.tar.zst
+*.tar.gz

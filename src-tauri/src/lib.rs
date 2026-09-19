@@ -712,6 +712,14 @@ pub fn run() {
                                                     let dir = first_file.get("path").and_then(|p| p.as_str())
                                                         .and_then(|p| std::path::Path::new(p).parent())
                                                         .map(|p| p.to_string_lossy().to_string());
+                                                    // Remove the stale .aria2 control file so a future
+                                                    // manual retry won't resume from corrupted state.
+                                                    if let Some(ref d) = dir {
+                                                        let ctrl = std::path::PathBuf::from(d).join(format!("{}.aria2", fname));
+                                                        if ctrl.exists() {
+                                                            let _ = std::fs::remove_file(&ctrl);
+                                                        }
+                                                    }
                                                     println!("[aria2] Auto-retry with reqwest: {} → {}", url, fname);
                                                     let app_clone = app_handle.clone();
                                                     let url_owned = url.to_string();

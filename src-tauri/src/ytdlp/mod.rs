@@ -52,6 +52,26 @@ fn yt_dlp_command_name() -> &'static str {
     }
 }
 
+fn yt_dlp_sidecar_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "yt-dlp-x86_64-pc-windows-msvc.exe"
+    } else if cfg!(target_os = "macos") {
+        "yt-dlp-x86_64-apple-darwin"
+    } else {
+        "yt-dlp-x86_64-unknown-linux-gnu"
+    }
+}
+
+fn yt_dlp_download_url() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+    } else if cfg!(target_os = "macos") {
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos.zip"
+    } else {
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
+    }
+}
+
 fn app_bin_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let base = app
         .path()
@@ -1908,11 +1928,11 @@ pub fn check_yt_dlp_exists(app: tauri::AppHandle) -> Result<bool, String> {
 /// 2. Legacy `src-tauri/binaries/` from earlier development installs
 /// 3. `yt-dlp.exe` on PATH (release installs / system installs)
 pub fn yt_dlp_bin_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let packaged = app_bin_dir(app)?.join("yt-dlp-x86_64-pc-windows-msvc.exe");
+    let packaged = app_bin_dir(app)?.join(yt_dlp_sidecar_name());
     if packaged.exists() {
         return Ok(packaged);
     }
-    let legacy = legacy_bin_dir()?.join("yt-dlp-x86_64-pc-windows-msvc.exe");
+    let legacy = legacy_bin_dir()?.join(yt_dlp_sidecar_name());
     if legacy.exists() {
         return Ok(legacy);
     }
@@ -1974,7 +1994,7 @@ pub async fn install_yt_dlp(app: tauri::AppHandle) -> Result<String, String> {
 
     crate::install_cancel::clear(YT_DLP_INSTALL_CANCEL_KEY);
     let client = crate::util::configured_http_client(&app)?;
-    let download_url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+    let download_url = yt_dlp_download_url();
 
     println!("[~] Downloading yt-dlp from {}", download_url);
     if crate::install_cancel::is_cancelled(YT_DLP_INSTALL_CANCEL_KEY) {
@@ -1997,7 +2017,7 @@ pub async fn install_yt_dlp(app: tauri::AppHandle) -> Result<String, String> {
 
     let bin_dir = app_bin_dir(&app)?;
     std::fs::create_dir_all(&bin_dir).map_err(|e| format!("Failed to create bin dir: {}", e))?;
-    let out_path = bin_dir.join("yt-dlp-x86_64-pc-windows-msvc.exe");
+    let out_path = bin_dir.join(yt_dlp_sidecar_name());
 
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -2066,6 +2086,14 @@ pub async fn install_yt_dlp(app: tauri::AppHandle) -> Result<String, String> {
     );
 
     crate::install_cancel::clear(YT_DLP_INSTALL_CANCEL_KEY);
+
+    // On Unix, the downloaded binary needs execute permission.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o755));
+    }
+
     println!("[✓] yt-dlp saved to {}", out_path.display());
     Ok(format!("Saved yt-dlp to {}", out_path.display()))
 }

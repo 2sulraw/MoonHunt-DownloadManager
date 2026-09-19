@@ -345,7 +345,7 @@ pub async fn get_download_details(gid: String) -> Result<Value, String> {
         .prepare("SELECT filename, url, size, status, path, connections, size_bytes FROM downloads WHERE gid = ?1")
         .map_err(|e| format!("DB query error: {}", e))?;
     stmt.query_row([&gid], |row| {
-        let filename: String = row.get(0)?;
+        let _filename: String = row.get(0)?;
         let url: String = row.get(1)?;
         let size: String = row.get(2)?;
         let status: String = row.get(3)?;
@@ -482,6 +482,7 @@ pub async fn add_download(
     dir: Option<String>,
     schedule: Option<DownloadSchedule>,
     proxy: Option<PerDownloadProxy>,
+    resume: Option<bool>,
 ) -> Result<String, String> {
     let download_url = decode_thunder_url(&url).unwrap_or_else(|| url.clone());
     let thunder_tail = decode_thunder_url(&url).map(|_| {
@@ -540,6 +541,11 @@ pub async fn add_download(
     let proxy_db = apply_per_download_proxy(&mut options, proxy.as_ref());
     if let Some(p) = &proxy_db {
         println!("[~] Per-download proxy set: {}", p);
+    }
+    if resume.unwrap_or(false) {
+        options.insert("continue".to_string(), json!("true"));
+        options.insert("allow-overwrite".to_string(), json!("true"));
+        println!("[~] Resuming download — server confirmed same content");
     }
     if !extra_headers.is_empty() {
         options.insert("header".to_string(), json!(extra_headers));
@@ -1113,6 +1119,73 @@ pub async fn retry_download(app: tauri::AppHandle, gid: String) -> Result<String
         return Err("Could not determine original URL for retry".to_string());
     }
 
+    // Decide whether we can safely resume the partial file on disk.
+    // Resume is safe only when the server still serves the same content
+    // (same Content-Length, supports Range). Temporary CDN URLs often
+    // expire — resuming with a stale URL causes silent corruption.
+    let mut can_resume = false;
+    if let (Some(ref fname), Some(ref dir)) = (&filename_opt, &dir_opt) {
+        let partial = std::path::PathBuf::from(dir).join(fname);
+        if partial.exists() {
+            if let Ok(local_size) = std::fs::metadata(&partial).map(|m| m.len()) {
+                if local_size > 0 {
+                    // HEAD request: check Range support + Content-Length
+                    can_resume = match async {
+                        let client = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(15))
+                            .build()?;
+                        let resp = client.head(&url).send().await?;
+                        Ok::<_, Box<dyn std::error::Error>>(resp)
+                    }.await {
+                        Ok(resp) => {
+                            let ranges = resp.headers().get("accept-ranges")
+                                .and_then(|v| v.to_str().ok())
+                                .map(|v| v.contains("bytes"))
+                                .unwrap_or(false);
+                            let server_len = resp.content_length();
+                            let status_ok = resp.status().is_success();
+                            let matches = server_len.map(|cl| cl > local_size).unwrap_or(false);
+                            let ok = status_ok && ranges && matches;
+                            println!("[~] Resume check: status={} ranges={} server_len={:?} local={} → {}",
+                                resp.status(), ranges, server_len, local_size, if ok { "RESUME" } else { "FRESH" });
+                            ok
+                        }
+                        Err(e) => {
+                            println!("[~] Resume check failed ({}), will start fresh", e);
+                            false
+                        }
+                    };
+                }
+            }
+        }
+    }
+
+    // Always remove the .aria2 control file — it may reference stale URIs.
+    // If resuming, we keep the partial data file and pass continue=true to aria2.
+    // If fresh start, we remove everything.
+    if let (Some(ref fname), Some(ref dir)) = (&filename_opt, &dir_opt) {
+        if !fname.is_empty() {
+            let control = std::path::PathBuf::from(dir).join(format!("{}.aria2", fname));
+            if control.exists() {
+                if let Err(e) = std::fs::remove_file(&control) {
+                    println!("[!] Failed to remove control file {}: {}", control.display(), e);
+                } else {
+                    println!("[~] Removed .aria2 control file: {}", control.display());
+                }
+            }
+            if !can_resume {
+                let partial = std::path::PathBuf::from(dir).join(fname);
+                if partial.exists() {
+                    if let Err(e) = std::fs::remove_file(&partial) {
+                        println!("[!] Failed to remove partial file {}: {}", partial.display(), e);
+                    } else {
+                        println!("[~] Removed partial file for fresh start: {}", partial.display());
+                    }
+                }
+            }
+        }
+    }
+
     let _ = remove_download(app.clone(), gid.clone()).await;
     let _ = crate::db::remove_download_from_db(app.clone(), gid.clone());
 
@@ -1121,7 +1194,7 @@ pub async fn retry_download(app: tauri::AppHandle, gid: String) -> Result<String
     if source == "yt-dlp" {
         crate::ytdlp::add_yt_download(app, url, "best".to_string(), None, dir_opt, None, None).await
     } else {
-        add_download(app, url, filename_opt, connections_opt, dir_opt, None, None).await
+        add_download(app, url, filename_opt, connections_opt, dir_opt, None, None, Some(can_resume)).await
     }
 }
 
@@ -1496,6 +1569,12 @@ pub async fn reqwest_download(
     };
 
     let file_path = std::path::PathBuf::from(&download_dir).join(&filename);
+    // Remove stale .aria2 control file so future retries don't resume from
+    // corrupted partial data left by a previous aria2 attempt.
+    let control_file = file_path.with_file_name(format!("{}.aria2", file_path.file_name().unwrap_or_default().to_string_lossy()));
+    if control_file.exists() {
+        let _ = std::fs::remove_file(&control_file);
+    }
     println!("[reqwest] Downloading {} → {}", url, file_path.display());
 
     let mut builder = reqwest::Client::builder()

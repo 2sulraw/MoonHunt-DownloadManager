@@ -21,6 +21,11 @@
           "args": true
         },
         {
+          "name": "binaries/yt-dlp-x86_64-unknown-linux-gnu",
+          "sidecar": true,
+          "args": true
+        },
+        {
           "name": "binaries/yt-dlp-x86_64-pc-windows-msvc",
           "sidecar": true,
           "args": true

@@ -22,44 +22,131 @@ struct RuntimeDef {
     size_label: &'static str,
 }
 
-const RUNTIMES: &[RuntimeDef] = &[
-    RuntimeDef {
-        id: "quickjs",
-        name: "QuickJS",
-        exe: "qjs-windows-x86_64.exe",
-        url: "https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-windows-x86_64.exe",
-        archive: false,
-        archive_name: "",
-        size_label: "~2 MB",
-    },
-    RuntimeDef {
-        id: "node",
-        name: "Node.js",
-        exe: "node.exe",
-        url: "https://nodejs.org/dist/latest-v24.x/win-x64/node.exe",
-        archive: false,
-        archive_name: "",
-        size_label: "~88 MB",
-    },
-    RuntimeDef {
-        id: "bun",
-        name: "Bun",
-        exe: "bun.exe",
-        url: "https://github.com/oven-sh/bun/releases/latest/download/bun-windows-x64.zip",
-        archive: true,
-        archive_name: "bun.exe",
-        size_label: "~37 MB zip / ~100 MB installed",
-    },
-    RuntimeDef {
-        id: "deno",
-        name: "Deno",
-        exe: "deno.exe",
-        url: "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip",
-        archive: true,
-        archive_name: "deno.exe",
-        size_label: "~41 MB zip / ~100 MB installed",
-    },
-];
+fn get_runtimes() -> Vec<RuntimeDef> {
+    if cfg!(target_os = "windows") {
+        vec![
+            RuntimeDef {
+                id: "quickjs",
+                name: "QuickJS",
+                exe: "qjs-windows-x86_64.exe",
+                url: "https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-windows-x86_64.exe",
+                archive: false,
+                archive_name: "",
+                size_label: "~2 MB",
+            },
+            RuntimeDef {
+                id: "node",
+                name: "Node.js",
+                exe: "node.exe",
+                url: "https://nodejs.org/dist/latest-v24.x/win-x64/node.exe",
+                archive: false,
+                archive_name: "",
+                size_label: "~88 MB",
+            },
+            RuntimeDef {
+                id: "bun",
+                name: "Bun",
+                exe: "bun.exe",
+                url: "https://github.com/oven-sh/bun/releases/latest/download/bun-windows-x64.zip",
+                archive: true,
+                archive_name: "bun.exe",
+                size_label: "~37 MB zip / ~100 MB installed",
+            },
+            RuntimeDef {
+                id: "deno",
+                name: "Deno",
+                exe: "deno.exe",
+                url: "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip",
+                archive: true,
+                archive_name: "deno.exe",
+                size_label: "~41 MB zip / ~100 MB installed",
+            },
+        ]
+    } else if cfg!(target_os = "macos") {
+        vec![
+            RuntimeDef {
+                id: "quickjs",
+                name: "QuickJS",
+                exe: "qjs-darwin-universal",
+                url: "https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-darwin-universal",
+                archive: false,
+                archive_name: "",
+                size_label: "~2 MB",
+            },
+            RuntimeDef {
+                id: "node",
+                name: "Node.js",
+                exe: "node",
+                url: "https://nodejs.org/dist/latest-v24.x/node-v24.12.0-darwin-arm64.tar.gz",
+                archive: true,
+                archive_name: "node",
+                size_label: "~45 MB",
+            },
+            RuntimeDef {
+                id: "bun",
+                name: "Bun",
+                exe: "bun",
+                url: "https://github.com/oven-sh/bun/releases/latest/download/bun-darwin-aarch64.zip",
+                archive: true,
+                archive_name: "bun",
+                size_label: "~37 MB zip / ~100 MB installed",
+            },
+            RuntimeDef {
+                id: "deno",
+                name: "Deno",
+                exe: "deno",
+                url: "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip",
+                archive: true,
+                archive_name: "deno",
+                size_label: "~41 MB zip / ~100 MB installed",
+            },
+        ]
+    } else {
+        // Linux
+        vec![
+            RuntimeDef {
+                id: "quickjs",
+                name: "QuickJS",
+                exe: "qjs-linux-x86_64",
+                url: "https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-linux-x86_64",
+                archive: false,
+                archive_name: "",
+                size_label: "~2 MB",
+            },
+            RuntimeDef {
+                id: "node",
+                name: "Node.js",
+                exe: "node",
+                url: "https://nodejs.org/dist/latest-v24.x/node-v24.12.0-linux-x64.tar.gz",
+                archive: true,
+                archive_name: "node",
+                size_label: "~45 MB",
+            },
+            RuntimeDef {
+                id: "bun",
+                name: "Bun",
+                exe: "bun",
+                url: "https://github.com/oven-sh/bun/releases/latest/download/bun-linux-x64.zip",
+                archive: true,
+                archive_name: "bun",
+                size_label: "~37 MB zip / ~100 MB installed",
+            },
+            RuntimeDef {
+                id: "deno",
+                name: "Deno",
+                exe: "deno",
+                url: "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip",
+                archive: true,
+                archive_name: "deno",
+                size_label: "~41 MB zip / ~100 MB installed",
+            },
+        ]
+    }
+}
+
+fn runtime_def(id: &str) -> Option<RuntimeDef> {
+    get_runtimes().into_iter().find(|def| def.id == id)
+}
 
 pub(crate) const SYSTEM_NODE_ID: &str = "system-node";
 
@@ -131,10 +218,6 @@ fn detect_system_node() -> Option<SystemNodeInfo> {
     Some(SystemNodeInfo { version, path })
 }
 
-fn runtime_def(id: &str) -> Option<&'static RuntimeDef> {
-    RUNTIMES.iter().find(|def| def.id == id)
-}
-
 fn runtime_bin_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let base = app
         .path()
@@ -163,7 +246,7 @@ pub fn get_js_runtimes(app: tauri::AppHandle) -> Result<serde_json::Value, Strin
     let selected = selected_runtime_id(&app)?;
     let mut runtimes = Vec::new();
 
-    for def in RUNTIMES {
+    for def in get_runtimes() {
         let path = runtime_path(&app, def.id)?;
         let installed = path.exists();
         runtimes.push(json!({
@@ -367,6 +450,13 @@ pub async fn install_js_runtime(
         let _ = std::fs::remove_file(&temp_path);
         crate::install_cancel::clear(&cancel_key);
         return Err("Install cancelled".to_string());
+    }
+
+    // On Unix, ensure the downloaded binary is executable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o755));
     }
 
     crate::install_cancel::clear(&cancel_key);

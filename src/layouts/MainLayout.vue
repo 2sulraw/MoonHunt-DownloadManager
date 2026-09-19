@@ -9,9 +9,13 @@
         :searchEnabled="route.path === '/downloads'"
         :showDownloadActions="route.path === '/'"
         :update-available="updateAvailable"
+        :search-results="searchPreview"
+        :search-total="searchTotal"
+        :search-preview-enabled="searchPreviewEnabled"
         @new-download="handleNewDownload"
         @batch-download="handleBatchDownload"
         @update-available-click="showUpdateModal = true"
+        @preview-select="handlePreviewSelect"
       />
 
       <div class="content-area">
@@ -115,6 +119,53 @@ provide('rememberRequestedConnections', rememberRequestedConnections)
 
 const searchQuery = ref('')
 provide('searchQuery', searchQuery)
+
+const SEARCH_PREVIEW_LIMIT = 6
+
+/** Top matches for the titlebar search preview (same filter as DownloadsPage). */
+const searchMatches = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q) return []
+  return downloads.value.filter((d) =>
+    (d.filename || '').toLowerCase().includes(q) ||
+    (d.url || '').toLowerCase().includes(q)
+  )
+})
+
+const searchPreview = computed(() =>
+  searchMatches.value.slice(0, SEARCH_PREVIEW_LIMIT).map((d) => ({
+    gid: d.gid,
+    filename: d.filename,
+    url: d.url,
+    status: d.status,
+    progress: d.progress ?? 0,
+  }))
+)
+
+const searchTotal = computed(() => searchMatches.value.length)
+
+/** Titlebar search preview on/off (Settings → General → Search). Default on. */
+const searchPreviewEnabled = ref(true)
+
+async function loadSearchPreviewPref() {
+  try {
+    const saved = await invoke<{ searchPreviewEnabled?: boolean }>('get_all_settings', {})
+    if (saved && typeof saved.searchPreviewEnabled === 'boolean') {
+      searchPreviewEnabled.value = saved.searchPreviewEnabled
+    }
+  } catch {
+    // Outside Tauri the backend is unavailable; keep default (on).
+  }
+}
+
+function handlePreviewSelect(gid: string) {
+  const focus = () => window.dispatchEvent(new CustomEvent('moonhunt:focus-download', { detail: { gid } }))
+  if (route.path !== '/downloads') {
+    router.push('/downloads').then(() => setTimeout(focus, 150))
+  } else {
+    focus()
+  }
+}
 
 function openGlobalContextMenu(download: Download, x: number, y: number) {
   contextMenuDownload.value = download
@@ -357,9 +408,15 @@ const checkDueSchedules = async () => {
   }
 }
 
+function onSettingsChanged() {
+  void loadSearchPreviewPref()
+}
+
 onMounted(async () => {
   await loadTheme()
   await loadLimitSettings()
+  void loadSearchPreviewPref()
+  window.addEventListener('moonhunt:settings-changed', onSettingsChanged)
   startPeriodicPersist()
 
   ;(async () => {
@@ -402,6 +459,7 @@ onUnmounted(() => {
   torrentDropUnlisten.forEach((fn) => { try { fn() } catch { /* already removed */ } })
   torrentDropUnlisten = []
   stopPeriodicPersist()
+  window.removeEventListener('moonhunt:settings-changed', onSettingsChanged)
   window.removeEventListener('yt-dlp-start', onYtDlpStartEvent)
 })
 </script>

@@ -28,6 +28,7 @@ export interface Settings {
   verifySsl: boolean
   deleteFileOnCancel: boolean
   disableHardwareAcceleration: boolean
+  searchPreviewEnabled?: boolean
   debugLogging?: boolean
   torrentDownloadLocation?: string
   torrentMaxConnections?: number

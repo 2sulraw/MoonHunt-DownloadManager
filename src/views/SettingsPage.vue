@@ -87,6 +87,19 @@
         <p class="field-hint">{{ t('This limit applies to all downloads at once.') }}</p>
 
         <div class="section-divider"></div>
+        <h2 class="section-title" style="margin-top: 20px;">{{ t('Search') }}</h2>
+
+        <div class="field row-field">
+          <label>{{ t('Search Preview') }}</label>
+          <div class="toggle-row">
+            <div class="toggle" :class="{ active: searchPreviewEnabled }" @click="searchPreviewEnabled = !searchPreviewEnabled" role="switch" :aria-checked="searchPreviewEnabled">
+              <div class="toggle-track"><div class="toggle-thumb"></div></div>
+            </div>
+          </div>
+        </div>
+        <p class="field-hint">{{ t('Show matching downloads in a dropdown while typing in the titlebar search.') }}</p>
+
+        <div class="section-divider"></div>
         <h2 class="section-title" style="margin-top: 20px;">{{ t('Security') }}</h2>
 
         <div class="field row-field">
@@ -2404,6 +2417,7 @@ const protocolRegistered = ref(false)
 
 
 const verifySsl = ref(true)
+const searchPreviewEnabled = ref(true)
 const hardwareAccel = ref(true)
 const debugLogging = ref(false)
 const i18n = useI18n()
@@ -2783,6 +2797,7 @@ const DEFAULT_SETTINGS = {
   maxDownloadSpeed: 0,
   globalSpeedLimitEnabled: false,
   verifySsl: true,
+  searchPreviewEnabled: true,
   proxyType: 'none',
   proxyHost: '',
   proxyPort: 1080,
@@ -2829,6 +2844,7 @@ async function loadSettings() {
       globalSpeedLimit.loaded.value = true
       syncSpeedLimitInput()
       verifySsl.value = saved.verifySsl ?? DEFAULT_SETTINGS.verifySsl
+      searchPreviewEnabled.value = saved.searchPreviewEnabled ?? DEFAULT_SETTINGS.searchPreviewEnabled
       proxyType.value = saved.proxyType || DEFAULT_SETTINGS.proxyType
       proxyHost.value = saved.proxyHost || DEFAULT_SETTINGS.proxyHost
       proxyPort.value = saved.proxyPort ?? DEFAULT_SETTINGS.proxyPort
@@ -2894,6 +2910,7 @@ async function resetToDefaults() {
     dlLimitUsedBytes.value = DEFAULT_SETTINGS.downloadLimitUsedBytes
     dlLimitUnit.value = DEFAULT_SETTINGS.downloadLimitUnit
     verifySsl.value = DEFAULT_SETTINGS.verifySsl
+    searchPreviewEnabled.value = DEFAULT_SETTINGS.searchPreviewEnabled
     hardwareAccel.value = true
     language.value = 'en'
     setLocale('en')
@@ -2937,6 +2954,7 @@ async function saveSettings() {
     maxDownloadSpeed: maxDownloadSpeed.value,
     globalSpeedLimitEnabled: speedLimitEnabled.value,
     verifySsl: verifySsl.value,
+    searchPreviewEnabled: searchPreviewEnabled.value,
     proxyType: proxyEnabled.value ? proxyType.value : 'none',
     proxyHost: proxyHost.value,
     proxyPort: proxyPort.value,
@@ -2980,6 +2998,8 @@ async function saveSettings() {
 
     saved = true
     notify(t('All settings saved successfully!'), 'success')
+    // Let the rest of the app (e.g. titlebar search preview) pick up the change.
+    window.dispatchEvent(new Event('moonhunt:settings-changed'))
   } catch (error) {
     notify(t('Error saving settings') + ': ' + error, 'error')
   } finally {

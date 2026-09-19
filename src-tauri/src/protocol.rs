@@ -35,7 +35,7 @@ pub async fn is_default_protocol_client(protocol: String) -> Result<bool, String
 pub async fn set_default_protocol_client(app: AppHandle, protocol: String) -> Result<String, String> {
     use tauri_plugin_deep_link::DeepLinkExt;
     // Prefer the deep-link plugin's cross-platform registration.
-    if let Err(_plugin_err) = app.deep_link().register(&protocol) {
+    if let Err(plugin_err) = app.deep_link().register(&protocol) {
         // Fall back to a direct HKCU registry write on Windows for dev/portable builds.
         #[cfg(target_os = "windows")]
         {

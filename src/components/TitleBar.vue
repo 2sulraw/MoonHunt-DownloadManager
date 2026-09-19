@@ -7,18 +7,55 @@
 
     <!-- Search -->
     <div v-if="searchEnabled" class="titlebar-search-center">
-      <div class="search-input-wrap">
+      <div class="search-input-wrap" :class="{ open: showPreview }">
         <i class="material-icons search-icon">search</i>
         <input
           :value="searchQuery"
-          @input="$emit('update:searchQuery', ($event.target as HTMLInputElement).value)"
+          @input="onSearchInput(($event.target as HTMLInputElement).value)"
+          @focus="searchFocused = true; activeIndex = -1"
+          @blur="onSearchBlur"
+          @keydown="onSearchKeydown"
           class="search-field"
-          :placeholder="searchPlaceholder"
+          :placeholder="effectiveSearchPlaceholder"
           ref="searchInputRef"
+          role="combobox"
+          :aria-expanded="showPreview"
+          aria-autocomplete="list"
         />
-        <button v-if="searchQuery" @click="$emit('update:searchQuery', '')" class="search-clear-btn">
+        <button v-if="searchQuery" @click="clearSearch" class="search-clear-btn">
           <i class="material-icons">close</i>
         </button>
+        <!-- Preview dropdown -->
+        <div v-if="showPreview" class="search-preview" role="listbox">
+          <template v-if="searchResults.length > 0">
+            <button
+              v-for="(item, idx) in searchResults"
+              :key="item.gid"
+              class="search-preview-item"
+              :class="{ active: idx === activeIndex }"
+              role="option"
+              :aria-selected="idx === activeIndex"
+              @mousedown.prevent="selectItem(item.gid)"
+              @mouseenter="activeIndex = idx"
+            >
+              <i class="material-icons preview-status-icon" :class="'st-' + item.status">{{ statusIcon(item.status) }}</i>
+              <span class="preview-main">
+                <span class="preview-name" :title="item.filename" v-html="highlightMatch(item.filename)"></span>
+                <span class="preview-sub">
+                  <span class="preview-status" :class="'st-' + item.status">{{ item.status }}</span>
+                  <span class="preview-progress">{{ item.progress }}%</span>
+                </span>
+              </span>
+            </button>
+            <div v-if="searchTotal > searchResults.length" class="search-preview-footer">
+              {{ searchTotal - searchResults.length }} {{ t('more — press Enter to filter list') }}
+            </div>
+          </template>
+          <div v-else class="search-preview-empty">
+            <i class="material-icons">search_off</i>
+            <span>{{ t('No matches for') }} “{{ searchQuery.trim() }}”</span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -64,6 +101,14 @@ import { useI18n } from '../i18n'
 
 const { t } = useI18n()
 
+export interface SearchPreviewItem {
+  gid: string
+  filename: string
+  url: string
+  status: string
+  progress: number
+}
+
 const props = withDefaults(defineProps<{
   title: string
   searchQuery?: string
@@ -71,12 +116,18 @@ const props = withDefaults(defineProps<{
   searchPlaceholder?: string
   showDownloadActions?: boolean
   updateAvailable?: boolean
+  searchResults?: SearchPreviewItem[]
+  searchTotal?: number
+  searchPreviewEnabled?: boolean
 }>(), {
   searchQuery: '',
   searchEnabled: false,
   searchPlaceholder: '',
   showDownloadActions: false,
   updateAvailable: false,
+  searchResults: () => [],
+  searchTotal: 0,
+  searchPreviewEnabled: true,
 })
 
 const effectiveSearchPlaceholder = computed(() => props.searchPlaceholder || t('Search by name or URL...'))
@@ -86,9 +137,82 @@ const emit = defineEmits<{
   'new-download': []
   'batch-download': []
   'update-available-click': []
+  'preview-select': [gid: string]
 }>()
 
 const searchInputRef = ref<HTMLInputElement | null>(null)
+const searchFocused = ref(false)
+const activeIndex = ref(-1)
+
+const showPreview = computed(() =>
+  props.searchEnabled && props.searchPreviewEnabled && searchFocused.value && props.searchQuery.trim().length > 0
+)
+
+function onSearchInput(value: string) {
+  activeIndex.value = -1
+  emit('update:searchQuery', value)
+}
+
+function clearSearch() {
+  activeIndex.value = -1
+  emit('update:searchQuery', '')
+  searchInputRef.value?.focus()
+}
+
+function onSearchBlur() {
+  // Delay so mousedown on a preview item fires before we hide.
+  setTimeout(() => { searchFocused.value = false }, 120)
+}
+
+function selectItem(gid: string) {
+  searchFocused.value = false
+  activeIndex.value = -1
+  emit('preview-select', gid)
+}
+
+function onSearchKeydown(e: KeyboardEvent) {
+  if (!showPreview.value) return
+  if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    if (!props.searchResults.length) return
+    activeIndex.value = (activeIndex.value + 1) % props.searchResults.length
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    if (!props.searchResults.length) return
+    activeIndex.value = (activeIndex.value - 1 + props.searchResults.length) % props.searchResults.length
+  } else if (e.key === 'Enter') {
+    if (activeIndex.value >= 0 && props.searchResults[activeIndex.value]) {
+      e.preventDefault()
+      selectItem(props.searchResults[activeIndex.value].gid)
+    } else {
+      // Keep filtering the list; just dismiss the dropdown.
+      searchFocused.value = false
+    }
+  }
+}
+
+function statusIcon(status: string): string {
+  switch (status) {
+    case 'active': return 'download'
+    case 'waiting': return 'hourglass_top'
+    case 'paused': return 'pause'
+    case 'complete': return 'done'
+    case 'error': return 'error_outline'
+    default: return 'inbox'
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+function highlightMatch(name: string): string {
+  const q = props.searchQuery.trim()
+  if (!q) return escapeHtml(name)
+  const idx = name.toLowerCase().indexOf(q.toLowerCase())
+  if (idx === -1) return escapeHtml(name)
+  return escapeHtml(name.slice(0, idx)) + '<mark>' + escapeHtml(name.slice(idx, idx + q.length)) + '</mark>' + escapeHtml(name.slice(idx + q.length))
+}
 
 function handleKeydown(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
@@ -131,6 +255,10 @@ try {
 <style scoped>
 .titlebar {
   position: relative;
+  /* Above page layers (sticky toolbar is z-900) so the search preview
+     dropdown — trapped in the translateX(-50%) stacking context below —
+     always paints on top. Still below modals/menus (z-1000+). */
+  z-index: 950;
   padding: 0 16px;
   height: 50px;
   display: flex;
@@ -216,6 +344,116 @@ try {
 
 .search-clear-btn i {
   font-size: 14px;
+}
+
+/* ── Search preview dropdown ── */
+.search-input-wrap {
+  position: relative;
+}
+
+.search-input-wrap.open {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.search-preview {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: -1px;
+  right: -1px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  z-index: 1000;
+  padding: 4px;
+}
+
+.search-preview-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text);
+  font-family: inherit;
+}
+
+.search-preview-item:hover,
+.search-preview-item.active {
+  background: var(--hover-bg);
+}
+
+.preview-status-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+
+.preview-status-icon.st-active { color: var(--accent-strong); }
+.preview-status-icon.st-complete { color: var(--status-complete, #81c784); }
+.preview-status-icon.st-error { color: var(--status-error, #e57373); }
+.preview-status-icon.st-paused { color: var(--status-paused, #ffb74d); }
+
+.preview-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.preview-name {
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preview-name mark {
+  background: rgba(var(--accent-rgb), 0.35);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.preview-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+.preview-status.st-active { color: var(--accent-strong); }
+.preview-status.st-complete { color: var(--status-complete, #81c784); }
+.preview-status.st-error { color: var(--status-error, #e57373); }
+
+.search-preview-footer {
+  padding: 6px 8px 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.search-preview-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.search-preview-empty i {
+  font-size: 16px;
 }
 
 /* ── Actions ── */

@@ -29,17 +29,53 @@ fn resolve_aria2c_bin() -> Result<std::path::PathBuf, String> {
         .parent()
         .ok_or("Cannot get exe parent dir")?
         .to_path_buf();
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    // Platform-specific candidates: bundled sidecar name, plain name, dev dir
+    #[cfg(target_os = "windows")]
     let candidates = [
         exe_dir.join("aria2c-x86_64-pc-windows-msvc.exe"),
         exe_dir.join("aria2c.exe"),
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries")
-            .join("aria2c.exe"),
+        manifest_dir.join("binaries").join("aria2c.exe"),
     ];
-    candidates
+    #[cfg(target_os = "macos")]
+    let candidates = [
+        exe_dir.join("aria2c-x86_64-apple-darwin"),
+        exe_dir.join("aria2c"),
+        manifest_dir.join("binaries").join("aria2c"),
+    ];
+    #[cfg(target_os = "linux")]
+    let candidates = [
+        exe_dir.join("aria2c-x86_64-unknown-linux-gnu"),
+        exe_dir.join("aria2c"),
+        manifest_dir.join("binaries").join("aria2c-x86_64-unknown-linux-gnu"),
+        std::path::PathBuf::from("/usr/lib/moonhunt/aria2c"),
+    ];
+
+    let found = candidates
         .into_iter()
-        .find(|p| p.exists())
-        .ok_or_else(|| "aria2c binary not found".to_string())
+        .find(|p| p.exists());
+
+    // On Linux, also fall back to system PATH if no bundled binary was found.
+    #[cfg(target_os = "linux")]
+    let found = found.or_else(|| {
+        std::process::Command::new("which")
+            .arg("aria2c")
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        let p = std::path::PathBuf::from(path);
+                        if p.exists() { return Some(p); }
+                    }
+                }
+                None
+            })
+    });
+
+    found.ok_or_else(|| "aria2c binary not found".to_string())
 }
 
 fn build_aria2_args(

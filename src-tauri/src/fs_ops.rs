@@ -115,12 +115,17 @@ async fn resolve_download_path(
         let dir = settings.download_location.clone();
         if dir.trim().is_empty() {
             // Prefer the OS-reported "Downloads" folder over a hardcoded
-            // "C:/Downloads" path that rarely exists in real Windows setups.
-            // Use backslashes so any downstream command-line invocation
-            // (e.g. explorer.exe) parses the path correctly — Windows
-            // shell APIs do not accept forward slashes.
-            dirs::download_dir()
-                .unwrap_or_else(|| PathBuf::from("C:\\Downloads"))
+            // path that rarely exists in real setups.
+            dirs::download_dir().unwrap_or_else(|| {
+                #[cfg(target_os = "windows")]
+                { PathBuf::from("C:\\Downloads") }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    dirs::home_dir()
+                        .map(|h| h.join("Downloads"))
+                        .unwrap_or_else(|| PathBuf::from("/tmp"))
+                }
+            })
         } else {
             // Canonicalize the user-supplied path to absolute, backslash
             // separators. If the path doesn't exist yet, fall back to a
@@ -543,7 +548,7 @@ fn collect_system_stats(app: tauri::AppHandle) -> Result<serde_json::Value, Stri
 /// at process startup — it cannot be applied mid-run.
 #[command]
 pub async fn set_hardware_acceleration(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     enabled: bool,
 ) -> Result<String, String> {
     let mut path = dirs::data_local_dir()

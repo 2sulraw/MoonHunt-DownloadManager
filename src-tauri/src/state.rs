@@ -74,6 +74,9 @@ pub struct ProxySettings {
     pub torrent_upload_limit: Option<u32>,
     #[serde(default)]
     pub open_in_browser_protocol_enabled: bool,
+    /// Titlebar search: show matching-downloads preview dropdown. Default on.
+    #[serde(default = "default_true")]
+    pub search_preview_enabled: bool,
 }
 
 fn default_true() -> bool { true }
@@ -91,9 +94,7 @@ fn default_retry_wait() -> u32 { 3 }
 impl Default for ProxySettings {
     fn default() -> Self {
         Self {
-            download_location: dirs::download_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| "C:/Downloads".to_string()),
+            download_location: default_download_dir(),
             max_concurrent: 5,
             max_download_speed: 0,
             global_speed_limit_enabled: None,
@@ -129,6 +130,7 @@ impl Default for ProxySettings {
             torrent_upload_limit_enabled: None,
             torrent_upload_limit: None,
             open_in_browser_protocol_enabled: false,
+            search_preview_enabled: true,
         }
     }
 }
@@ -291,10 +293,24 @@ pub fn set_current_rpc_port(port: u32) {
     port_ref.store(port, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Platform-aware fallback for the default download directory.
+fn default_download_dir() -> String {
+    dirs::download_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| {
+            #[cfg(target_os = "windows")]
+            { "C:/Downloads".to_string() }
+            #[cfg(not(target_os = "windows"))]
+            {
+                dirs::home_dir()
+                    .map(|h| format!("{}/Downloads", h.display()))
+                    .unwrap_or_else(|| "/tmp".to_string())
+            }
+        })
+}
+
 /// Get the default download directory based on the OS.
 #[tauri::command]
 pub fn get_default_download_dir() -> String {
-    dirs::download_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "C:/Downloads".to_string())
+    default_download_dir()
 }

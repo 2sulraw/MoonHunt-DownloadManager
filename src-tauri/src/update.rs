@@ -1,7 +1,8 @@
 use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+
+#[cfg(target_os = "windows")]
 use std::time::Duration;
 use tauri::Emitter;
 use tauri::Manager;
@@ -36,6 +37,7 @@ fn is_newer(local: &str, tag: &str) -> bool {
 
 /// Pick the Windows NSIS installer asset (`.exe`) from a release's assets list.
 /// Falls back to the first `.exe`, then the first URL that ends with `.exe`/`.msi`.
+#[cfg(target_os = "windows")]
 fn exe_asset_url(body: &serde_json::Value) -> String {
     body.get("assets")
         .and_then(|a| a.as_array())
@@ -54,6 +56,55 @@ fn exe_asset_url(body: &serde_json::Value) -> String {
         .and_then(|u| u.as_str())
         .map(|s| s.to_string())
         .unwrap_or_default()
+}
+
+/// Pick the best Linux package asset from a release's assets list.
+/// Priority: .deb → .rpm → .AppImage → first asset.
+#[cfg(target_os = "linux")]
+fn linux_asset_url(body: &serde_json::Value) -> String {
+    body.get("assets")
+        .and_then(|a| a.as_array())
+        .and_then(|assets| {
+            assets
+                .iter()
+                .find(|a| {
+                    a.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|n| n.ends_with(".deb"))
+                        .unwrap_or(false)
+                })
+                .or_else(|| {
+                    assets.iter().find(|a| {
+                        a.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|n| n.ends_with(".rpm"))
+                            .unwrap_or(false)
+                    })
+                })
+                .or_else(|| {
+                    assets.iter().find(|a| {
+                        a.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|n| n.ends_with(".AppImage") || n.ends_with(".appimage"))
+                            .unwrap_or(false)
+                    })
+                })
+                .or_else(|| assets.first())
+        })
+        .and_then(|a| a.get("browser_download_url"))
+        .and_then(|u| u.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_default()
+}
+
+/// Pick the platform-appropriate installer asset from a release.
+fn platform_asset_url(body: &serde_json::Value) -> String {
+    #[cfg(target_os = "windows")]
+    { exe_asset_url(body) }
+    #[cfg(target_os = "linux")]
+    { linux_asset_url(body) }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    { String::new() }
 }
 
 #[tauri::command]
@@ -85,7 +136,7 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<UpdateStatus, Str
             .and_then(|u| u.as_str())
             .unwrap_or("")
             .to_string();
-        let asset_url = exe_asset_url(&body);
+        let asset_url = platform_asset_url(&body);
         let release_body = body.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string();
         Ok(UpdateStatus::Available {
             version: tag.to_string(),
@@ -112,33 +163,79 @@ fn installer_filename(asset_url: &str) -> String {
         .unwrap_or_else(|| "MoonHunt-setup.exe".to_string())
 }
 
-/// Spawn the downloaded NSIS installer with UAC elevation.
+/// Spawn the downloaded installer with elevated privileges.
 ///
-/// Since v0.0.2 the setup is `perMachine` and its manifest requires admin,
-/// so a plain `Command::spawn` (CreateProcess) fails with OS error 740
-/// (`ERROR_ELEVATION_REQUIRED`) — CreateProcess cannot trigger the UAC
-/// prompt. `runas` uses ShellExecuteEx with the `runas` verb, which can.
+/// **Windows:** NSIS installers require admin; `runas` triggers the UAC prompt.
+/// Cancellation (user clicks "No") yields `Ok(false)`.
 ///
-/// Returns true when a new process was started. A cancellation (user clicks
-/// "No" on the UAC prompt) yields an IO error whose raw_os_error is 1223
-/// (`ERROR_CANCELLED`) — that's not a failure of our code, so we surface it
-/// as Ok(false) to avoid alarming "update failed" UI for a user choice.
+/// **Linux:** `.deb` and `.rpm` are installed via `pkexec` (polkit GUI prompt).
+/// `.AppImage` is made executable and the user is told to run it manually.
+///
+/// Returns `true` when a new process was started.
 fn spawn_installer_elevated(installer: &std::path::Path) -> Result<bool, String> {
-    match std::process::Command::new("explorer.exe")
-        .arg(installer)
-        .spawn()
+    let name = installer
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    #[cfg(target_os = "windows")]
     {
-        Ok(_) => return Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("Failed to launch installer: {}", e)),
+        match std::process::Command::new("explorer.exe")
+            .arg(installer)
+            .spawn()
+        {
+            Ok(_) => return Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Failed to launch installer: {}", e)),
+        }
+        use runas::Command as RunasCommand;
+        match RunasCommand::new(installer).status() {
+            Ok(_) => Ok(true),
+            Err(e) if e.raw_os_error() == Some(1223) => Ok(false),
+            Err(e) => Err(format!("Failed to launch installer: {}", e)),
+        }
     }
-    // Fallback for exotic setups without explorer: direct CreateProcess via
-    // runas; reports ERROR_CANCELLED (user declined UAC) as Ok(false).
-    use runas::Command as RunasCommand;
-    match RunasCommand::new(installer).status() {
-        Ok(_) => Ok(true),
-        Err(e) if e.raw_os_error() == Some(1223) => Ok(false),
-        Err(e) => Err(format!("Failed to launch installer: {}", e)),
+
+    #[cfg(target_os = "linux")]
+    {
+        if name.ends_with(".deb") {
+            // Use pkexec for a polkit GUI password prompt to install the .deb.
+            std::process::Command::new("pkexec")
+                .args(["dpkg", "-i", &installer.to_string_lossy()])
+                .spawn()
+                .map_err(|e| format!("Failed to install .deb update: {}", e))?;
+            return Ok(true);
+        }
+        if name.ends_with(".rpm") {
+            std::process::Command::new("pkexec")
+                .args(["rpm", "-U", &installer.to_string_lossy()])
+                .spawn()
+                .map_err(|e| format!("Failed to install .rpm update: {}", e))?;
+            return Ok(true);
+        }
+        if name.ends_with(".AppImage") || name.ends_with(".appimage") {
+            // Make executable and inform the user.
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                installer,
+                std::fs::Permissions::from_mode(0o755),
+            );
+            // Open the AppImage in the default file manager so the user can run it.
+            let _ = std::process::Command::new("xdg-open")
+                .arg(installer.parent().unwrap_or(installer))
+                .spawn();
+            return Ok(true);
+        }
+        // Unknown format — open the releases page in the browser.
+        let _ = std::process::Command::new("xdg-open")
+            .arg("https://github.com/2sulraw/MoonHunt-DownloadManager/releases")
+            .spawn();
+        Ok(true)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        Ok(false)
     }
 }
 
@@ -210,23 +307,23 @@ pub async fn install_update(app: tauri::AppHandle, asset_url: String) -> Result<
     std::fs::rename(&temp_path, &out_path)
         .map_err(|e| format!("Failed to finalize download: {}", e))?;
 
-    // Fresh (new-version) download → launch it elevated and let the running
-    // instance exit so the new build can replace it. NSIS needs a moment to
-    // unpack. If the user declines the UAC prompt we keep the app open.
+    // Launch the installer. On Windows, exit so NSIS can replace files.
+    // On Linux, keep running (package manager handles the upgrade live).
     match spawn_installer_elevated(&out_path) {
         Ok(true) => {}
         Ok(false) => return Ok(out_path.to_string_lossy().into_owned()),
         Err(e) => return Err(e),
     }
-    let handle = app.clone();
-    std::thread::spawn(move || {
-        // Kill aria2c BEFORE exiting: the installer's app-running check only
-        // looks for moonhunt.exe, and a live aria2c keeps locking
-        // $INSTDIR\aria2c.exe, which makes the update fail to replace files.
-        crate::aria2::kill_aria2c();
-        std::thread::sleep(Duration::from_millis(2500));
-        handle.exit(0);
-    });
+
+    #[cfg(target_os = "windows")]
+    {
+        let handle = app.clone();
+        std::thread::spawn(move || {
+            crate::aria2::kill_aria2c();
+            std::thread::sleep(Duration::from_millis(2500));
+            handle.exit(0);
+        });
+    }
 
     Ok(out_path.to_string_lossy().into_owned())
 }
@@ -258,6 +355,7 @@ mod tests {
         assert!(!is_newer("not-a-version", "v0.1.2"));
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn exe_asset_url_prefers_installer() {
         let body = serde_json::json!({
@@ -269,6 +367,7 @@ mod tests {
         assert_eq!(exe_asset_url(&body), "https://x/setup.exe");
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn exe_asset_url_falls_back_to_first() {
         let body = serde_json::json!({
@@ -279,9 +378,46 @@ mod tests {
         assert_eq!(exe_asset_url(&body), "https://x/moonhunt.msi");
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn exe_asset_url_empty_when_no_assets() {
         assert_eq!(exe_asset_url(&serde_json::Value::Null), "");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_asset_url_prefers_deb() {
+        let body = serde_json::json!({
+            "assets": [
+                { "name": "moonhunt-0.1.5_amd64.rpm", "browser_download_url": "https://x/rpm" },
+                { "name": "moonhunt_0.1.5_amd64.deb", "browser_download_url": "https://x/deb" },
+                { "name": "moonhunt-0.1.5-x86_64.AppImage", "browser_download_url": "https://x/appimage" },
+            ]
+        });
+        assert_eq!(linux_asset_url(&body), "https://x/deb");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_asset_url_prefers_rpm_over_appimage() {
+        let body = serde_json::json!({
+            "assets": [
+                { "name": "moonhunt-0.1.5-x86_64.AppImage", "browser_download_url": "https://x/appimage" },
+                { "name": "moonhunt-0.1.5_amd64.rpm", "browser_download_url": "https://x/rpm" },
+            ]
+        });
+        assert_eq!(linux_asset_url(&body), "https://x/rpm");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_asset_url_falls_back_to_first() {
+        let body = serde_json::json!({
+            "assets": [
+                { "name": "moonhunt.tar.gz", "browser_download_url": "https://x/tar" },
+            ]
+        });
+        assert_eq!(linux_asset_url(&body), "https://x/tar");
     }
 
     #[test]

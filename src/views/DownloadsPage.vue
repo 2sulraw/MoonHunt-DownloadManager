@@ -2283,14 +2283,31 @@ onMounted(() => {
 
   const newDlHandler = () => { showAddDialog.value = true }
   const batchDlHandler = () => { showBatchDialog.value = true }
+  const focusDlHandler = (e: Event) => {
+    const gid = (e as CustomEvent).detail?.gid as string | undefined
+    if (!gid) return
+    // The list is filtered by searchQuery, so the card should be visible —
+    // wait a tick for Vue to render, then scroll + flash it.
+    nextTick(() => {
+      setTimeout(() => {
+        const el = document.querySelector(`[data-gid="${CSS.escape(gid)}"]`)
+        if (!el) return
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        el.classList.add('flash-highlight')
+        setTimeout(() => el.classList.remove('flash-highlight'), 1600)
+      }, 50)
+    })
+  }
   window.addEventListener('moonhunt:new-download', newDlHandler)
   window.addEventListener('moonhunt:batch-download', batchDlHandler)
+  window.addEventListener('moonhunt:focus-download', focusDlHandler)
   // MainLayout dispatches moonhunt:torrent-drop when a .torrent is dropped
   // anywhere on the app window (not just inside this page's dialog).
   window.addEventListener('moonhunt:torrent-drop', torrentDropHandler)
   onUnmounted(() => {
     window.removeEventListener('moonhunt:new-download', newDlHandler)
     window.removeEventListener('moonhunt:batch-download', batchDlHandler)
+    window.removeEventListener('moonhunt:focus-download', focusDlHandler)
     window.removeEventListener('moonhunt:torrent-drop', torrentDropHandler)
   })
 })
@@ -5225,6 +5242,16 @@ input[type="number"] {
 .stepper input:focus {
   outline: none;
   box-shadow: none;
+}
+
+/* Flash highlight for titlebar search preview selection */
+.flash-highlight > * {
+  animation: flash-ring 1.6s ease;
+  border-radius: 12px;
+}
+@keyframes flash-ring {
+  0%, 100% { box-shadow: none; }
+  20%, 60% { box-shadow: 0 0 0 2px var(--accent-strong); }
 }
 </style>
 
