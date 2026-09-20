@@ -34,27 +34,29 @@ aria2 is bundled — no extra setup required.
 **Linux:** `.deb` (Debian/Ubuntu), `.rpm` (Fedora/RHEL), or `.AppImage`
 (universal).
 
-**Arch Linux** — download the `.AppImage` from
-[Releases](https://github.com/2sulraw/MoonHunt-DownloadManager/releases),
-then:
+**Arch Linux** — clone and install with `makepkg`:
 
 ```bash
-# Install FUSE (needed for AppImage)
-sudo pacman -S fuse2
+git clone https://github.com/2sulraw/MoonHunt-DownloadManager.git
+cd MoonHunt-DownloadManager
+makepkg -si
+```
 
-# Make executable and run
+This installs the binary to `/usr/bin/moonhunt` and all system dependencies.
+After installation, launch from your app menu or run `moonhunt` in a terminal.
+
+Or download the `.AppImage` from
+[Releases](https://github.com/2sulraw/MoonHunt-DownloadManager/releases):
+
+```bash
+sudo pacman -S fuse2
 chmod +x moonhunt_*.AppImage
 ./moonhunt_*.AppImage
 ```
 
-Or install from AUR (coming soon).
-
-Or build from source:
+Or build from source with the helper script:
 
 ```bash
-sudo pacman -S webkit2gtk-4.1 libsoup3 gtk3 libappindicator-gtk3 librsvg base-devel nodejs npm
-git clone https://github.com/2sulraw/MoonHunt-DownloadManager.git
-cd MoonHunt-DownloadManager
 ./build-linux.sh
 ```
 
