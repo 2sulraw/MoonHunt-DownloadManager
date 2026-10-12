@@ -751,7 +751,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             aria2::start_aria2_with_settings,
+            aria2::start_aria2,
+            aria2::restart_aria2,
+            aria2::shutdown_aria2,
+            aria2::check_aria2_update,
             aria2::get_aria2_version,
+            aria2::get_aria2_bin_path,
+            aria2::open_aria2_location,
             aria2::add_download,
             aria2::add_torrent,
             aria2::parse_torrent_files,

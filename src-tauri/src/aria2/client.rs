@@ -169,6 +169,11 @@ impl Aria2Client {
             .await
     }
 
+    /// Gracefully stop the aria2 daemon (`aria2.shutdown` saves the session).
+    pub async fn shutdown(&self) -> Result<Value, String> {
+        self.call_result("aria2.shutdown", vec![]).await
+    }
+
     pub async fn change_option(&self, gid: &str, options: Map<String, Value>) -> Result<(), String> {
         let _ = self
             .call_result(

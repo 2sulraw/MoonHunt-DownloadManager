@@ -113,6 +113,72 @@
         <p class="field-hint">{{ t('When enabled, certificates are verified during downloads. Disable only if you encounter certificate errors.') }}</p>
       </section>
 
+      <section v-show="activeCategory === 'aria2c'" class="settings-section">
+        <h2 class="section-title">{{ t('Aria2c') }}</h2>
+        <p class="section-sub">{{ t('Advanced aria2 download engine settings.') }}</p>
+
+        <div class="field">
+          <label>{{ t('Engine Status') }}</label>
+          <button
+            type="button"
+            class="aria2-live-pill"
+            :class="aria2Status"
+            :disabled="aria2Checking"
+            @click="checkAria2Status"
+            :title="t('Click to re-check')"
+          >
+            <span class="aria2-live-dot"></span>
+            <i v-if="aria2Checking" class="material-icons spinning">hourglass_empty</i>
+            <i v-else class="material-icons">{{ aria2Status === 'running' ? 'check_circle' : 'error' }}</i>
+            <span>{{ aria2StatusLabel }}</span>
+            <span v-if="aria2Version" class="aria2-live-version">{{ aria2Version }}</span>
+            <i class="material-icons aria2-live-refresh" :class="{ spinning: aria2Checking }">refresh</i>
+          </button>
+          <p v-if="aria2Error" class="field-hint aria2-live-error">{{ aria2Error }}</p>
+        </div>
+
+        <div class="field">
+          <label>{{ t('Installed Location') }}</label>
+          <div class="nd-input-wrap nd-input-wrap--token">
+            <input v-model="aria2BinPath" readonly class="nd-input nd-path-input nd-token-input" :placeholder="t('Locating aria2c…')" />
+            <button @click="openAria2Location" class="nd-input-action nd-hide-btn" :title="t('Open folder')" :aria-label="t('Open folder')"><i class="material-icons">folder_open</i></button>
+            <button @click="copyToClipboard(aria2BinPath)" class="nd-input-action" :title="t('Copy to clipboard')" :aria-label="t('Copy to clipboard')"><i class="material-icons">content_copy</i></button>
+          </div>
+        </div>
+
+        <div class="section-divider"></div>
+        <div class="field">
+          <label>{{ t('Engine Controls') }}</label>
+          <div class="aria2-controls">
+            <button class="btn-check" :disabled="aria2Busy !== null || aria2Status === 'running'" @click="aria2Control('start')">
+              <i class="material-icons" :class="{ spinning: aria2Busy === 'start' }">{{ aria2Busy === 'start' ? 'hourglass_empty' : 'play_arrow' }}</i>
+              {{ t('Start') }}
+            </button>
+            <button class="btn-check" :disabled="aria2Busy !== null" @click="aria2Control('restart')">
+              <i class="material-icons" :class="{ spinning: aria2Busy === 'restart' }">{{ aria2Busy === 'restart' ? 'hourglass_empty' : 'restart_alt' }}</i>
+              {{ t('Restart') }}
+            </button>
+            <button class="btn-check" :disabled="aria2Busy !== null || aria2Status === 'down'" @click="aria2Control('shutdown')">
+              <i class="material-icons" :class="{ spinning: aria2Busy === 'shutdown' }">{{ aria2Busy === 'shutdown' ? 'hourglass_empty' : 'power_settings_new' }}</i>
+              {{ t('Shutdown') }}
+            </button>
+            <button class="btn-check" :disabled="aria2Busy !== null" @click="checkAria2Update">
+              <i class="material-icons" :class="{ spinning: aria2Busy === 'update' }">{{ aria2Busy === 'update' ? 'hourglass_empty' : 'update' }}</i>
+              {{ t('Check for Update') }}
+            </button>
+          </div>
+          <div v-if="aria2ControlMsg" class="proxy-test-result" :class="aria2ControlOk ? 'ok' : 'fail'" style="margin-top: 8px;">
+            <i class="material-icons">{{ aria2ControlOk ? 'check_circle' : 'error' }}</i>
+            <span>{{ aria2ControlMsg }}</span>
+          </div>
+          <div v-if="aria2Update" class="proxy-test-result" :class="aria2Update.updateAvailable ? 'fail' : 'ok'" style="margin-top: 8px;">
+            <i class="material-icons">{{ aria2Update.updateAvailable ? 'update' : 'check_circle' }}</i>
+            <span>{{ t('Installed:') }} {{ aria2Update.current }} · {{ t('Latest:') }} {{ aria2Update.latest || '—' }} — {{ aria2Update.updateAvailable ? t('Update available (ships with app updates)') : t('Up to date') }}</span>
+            <button v-if="aria2Update.url" @click="openAria2Release" class="btn-detect" style="margin-left: auto;">{{ t('Releases') }}</button>
+          </div>
+        </div>
+      </section>
+
       <section v-show="activeCategory === 'url'" class="settings-section">
         <h2 class="section-title">{{ t('URL Downloads') }}</h2>
         <p class="section-sub">{{ t('Where URL-based files land and how they download.') }}</p>
@@ -796,10 +862,24 @@
   margin-bottom: 32px;
   padding-bottom: 24px;
   border-bottom: 1px solid var(--border);
+  position: relative;
 }
 
-.settings-section:last-child {
-  border-bottom: none;
+/* Diamond ornament centered on the end-of-section line (all categories) */
+.settings-section::after,
+.section-divider::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  transform: translateX(-50%) rotate(45deg);
+  background: var(--bg-primary);
+  border: 1px solid var(--accent-strong);
+  box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.5);
+}
+.settings-section::after {
+  left: 50%;
+  bottom: -5px;
 }
 
 .section-title {
@@ -813,6 +893,12 @@
   height: 1px;
   background: var(--border);
   margin: 20px 0;
+  position: relative;
+}
+.section-divider::after {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) rotate(45deg);
 }
 
 .section-sub {
@@ -2005,6 +2091,54 @@ input[type="number"] {
 .proxy-test-result.fail { background: rgba(239,83,80,0.08); color: var(--status-error); }
 .proxy-test-result i { font-size: 16px; }
 
+/* ── Aria2c live status pill (liquid glass, button-sized, inset) ── */
+.aria2-live-pill {
+  display: inline-flex; align-items: center; gap: 8px; width: fit-content;
+  padding: 8px 16px; border-radius: 999px; cursor: pointer;
+  font-size: 13px; font-weight: 700; font-family: inherit;
+  border: 1px solid var(--border-strong);
+  backdrop-filter: blur(12px) saturate(1.4);
+  -webkit-backdrop-filter: blur(12px) saturate(1.4);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.25), inset 0 -1px 2px rgba(255, 255, 255, 0.08);
+  transition: all 0.2s ease;
+}
+.aria2-live-pill.running {
+  background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.22), rgba(var(--accent-rgb), 0.08));
+  border-color: rgba(var(--accent-rgb), 0.45);
+  color: var(--accent-strong);
+}
+.aria2-live-pill.down {
+  background: linear-gradient(135deg, rgba(239, 83, 80, 0.22), rgba(239, 83, 80, 0.08));
+  border-color: rgba(239, 83, 80, 0.5);
+  color: #ef5350;
+}
+.aria2-live-pill.checking {
+  background: rgba(142, 158, 178, 0.1);
+  border-color: var(--border-strong);
+  color: var(--text-dim);
+}
+.aria2-live-pill:hover:not(:disabled) { transform: translateY(-1px); }
+.aria2-live-pill:disabled { cursor: wait; opacity: 0.8; }
+.aria2-live-pill i { font-size: 18px; }
+.aria2-live-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+}
+.aria2-live-pill.running .aria2-live-dot { animation: aria2-pulse 1.6s ease-in-out infinite; }
+@keyframes aria2-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+.aria2-live-version {
+  font-size: 11px; font-weight: 600; opacity: 0.75;
+  padding: 2px 8px; border-radius: 999px;
+  background: rgba(0, 0, 0, 0.2);
+}
+.aria2-live-refresh { font-size: 15px !important; opacity: 0.6; }
+.spinning { animation: spin 1s linear infinite; }
+.aria2-live-error { color: var(--status-error); }
+
+/* ── Aria2c engine controls ── */
+.aria2-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+
 .btn-detect {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 5px 10px; border-radius: 6px; border: 1px solid var(--border);
@@ -2442,6 +2576,7 @@ const torrentUploadLimitInputValue = ref(100)
 const activeCategory = ref('general')
 const categories = [
   { key: 'general', label: 'General', icon: 'tune' },
+  { key: 'aria2c', label: 'Aria2c', icon: 'cloud_download' },
   { key: 'url', label: 'URL Downloads', icon: 'link' },
   { key: 'torrent', label: 'Torrent', icon: 'bolt' },
   { key: 'network', label: 'Network', icon: 'wifi' },
@@ -2450,6 +2585,121 @@ const categories = [
   { key: 'appearance', label: 'Appearance', icon: 'palette' },
   { key: 'performance', label: 'Performance', icon: 'monitoring' },
 ]
+
+// -- Aria2c live status --
+const aria2Status = ref<'checking' | 'running' | 'down'>('checking')
+const aria2Checking = ref(false)
+const aria2Version = ref('')
+const aria2Error = ref('')
+const aria2BinPath = ref('')
+let aria2Timer: number | null = null
+const aria2StatusLabel = computed(() => {
+  if (aria2Status.value === 'running') return t('Aria2c Running')
+  if (aria2Status.value === 'down') return t('Aria2c is not running')
+  return t('Checking Aria2c…')
+})
+
+async function checkAria2Status() {
+  if (aria2Checking.value) return
+  aria2Checking.value = true
+  aria2Error.value = ''
+  try {
+    const result = await invoke<{ version?: string } | string>('get_aria2_version')
+    const version = typeof result === 'string'
+      ? (JSON.parse(result).version as string | undefined)
+      : result?.version
+    aria2Status.value = 'running'
+    aria2Version.value = version ? `v${version}` : ''
+  } catch (e: unknown) {
+    aria2Status.value = 'down'
+    aria2Version.value = ''
+    aria2Error.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    aria2Checking.value = false
+  }
+}
+
+function startAria2Polling() {
+  stopAria2Polling()
+  void checkAria2Status()
+  void fetchAria2BinPath()
+  aria2Timer = window.setInterval(() => void checkAria2Status(), 5000)
+}
+
+function stopAria2Polling() {
+  if (aria2Timer !== null) {
+    window.clearInterval(aria2Timer)
+    aria2Timer = null
+  }
+}
+
+async function fetchAria2BinPath() {
+  try {
+    aria2BinPath.value = await invoke<string>('get_aria2_bin_path')
+  } catch (e: unknown) {
+    aria2BinPath.value = ''
+    console.error('Failed to resolve aria2c path:', e)
+  }
+}
+
+async function openAria2Location() {
+  try {
+    await invoke('open_aria2_location')
+  } catch (e: unknown) {
+    notify(t('Failed to open aria2 folder') + ': ' + (e instanceof Error ? e.message : String(e)), 'error')
+  }
+}
+
+// -- Aria2c engine controls (Start / Restart / Shutdown / Check for Update) --
+const aria2Busy = ref<null | 'start' | 'restart' | 'shutdown' | 'update'>(null)
+const aria2ControlMsg = ref('')
+const aria2ControlOk = ref(true)
+const aria2Update = ref<{ current: string; latest: string; updateAvailable: boolean; url: string } | null>(null)
+
+async function aria2Control(action: 'start' | 'restart' | 'shutdown') {
+  if (aria2Busy.value) return
+  const cmd = action === 'start' ? 'start_aria2' : action === 'restart' ? 'restart_aria2' : 'shutdown_aria2'
+  aria2Busy.value = action
+  aria2ControlMsg.value = ''
+  aria2Update.value = null
+  try {
+    const msg = await invoke<string>(cmd)
+    aria2ControlOk.value = true
+    aria2ControlMsg.value = msg
+    notify(msg, 'success')
+  } catch (e: unknown) {
+    aria2ControlOk.value = false
+    aria2ControlMsg.value = e instanceof Error ? e.message : String(e)
+    notify(aria2ControlMsg.value, 'error')
+  } finally {
+    aria2Busy.value = null
+    await checkAria2Status()
+  }
+}
+
+async function checkAria2Update() {
+  if (aria2Busy.value) return
+  aria2Busy.value = 'update'
+  aria2ControlMsg.value = ''
+  aria2Update.value = null
+  try {
+    aria2Update.value = await invoke<{ current: string; latest: string; updateAvailable: boolean; url: string }>('check_aria2_update')
+  } catch (e: unknown) {
+    aria2ControlOk.value = false
+    aria2ControlMsg.value = e instanceof Error ? e.message : String(e)
+    notify(aria2ControlMsg.value, 'error')
+  } finally {
+    aria2Busy.value = null
+  }
+}
+
+function openAria2Release() {
+  const url = aria2Update.value?.url
+  if (!url) return
+  invoke('open_external', { url }).catch(() => {
+    window.open(url, '_blank', 'noopener')
+  })
+}
 
 function handleEsc(e: KeyboardEvent) {
   if (e.key === 'Escape' && activeCategory.value !== 'general') {
@@ -2460,17 +2710,22 @@ function handleEsc(e: KeyboardEvent) {
 onMounted(() => {
   loadSettings()
   document.addEventListener('keydown', handleEsc)
+  if (activeCategory.value === 'aria2c') startAria2Polling()
 })
 
 onActivated(() => {
   if (activeCategory.value === 'performance') startLiveStats()
+  if (activeCategory.value === 'aria2c') startAria2Polling()
   // Settings stays mounted via keep-alive, so transient proxy alerts from a
   // previous visit would otherwise still be visible on return.
   detectResult.value = null
   proxyTestResult.value = null
 })
 
-onDeactivated(stopLiveStats)
+onDeactivated(() => {
+  stopLiveStats()
+  stopAria2Polling()
+})
 
 // -- Download Limit State --
 const dlLimit = useDownloadLimit()
@@ -2629,6 +2884,8 @@ watch(activeCategory, (category) => {
     startLiveStats()
     void refreshDbFiles()
   } else stopLiveStats()
+  if (category === 'aria2c') startAria2Polling()
+  else stopAria2Polling()
   // Transient proxy alerts belong to the network tab; clear them on tab switch.
   if (category !== 'network') {
     detectResult.value = null
@@ -2636,7 +2893,10 @@ watch(activeCategory, (category) => {
   }
 })
 
-onBeforeUnmount(stopLiveStats)
+onBeforeUnmount(() => {
+  stopLiveStats()
+  stopAria2Polling()
+})
 
 const themeApi = useTheme()
 const localTheme = ref('default')

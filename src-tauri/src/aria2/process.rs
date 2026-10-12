@@ -21,7 +21,7 @@ pub fn kill_aria2c() {
     }
 }
 
-fn resolve_aria2c_bin() -> Result<std::path::PathBuf, String> {
+pub(crate) fn resolve_aria2c_bin() -> Result<std::path::PathBuf, String> {
     // Tauri bundles the sidecar under the target-triple name; dev builds use a
     // plain binary. Try both next to the app exe, then the dev binaries dir.
     let exe_dir = std::env::current_exe()

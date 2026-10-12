@@ -79,12 +79,33 @@ pub async fn start_aria2_with_settings(
         *guard = settings.clone();
     }
 
-    // One-shot: only spawn once per app lifecycle
+    // One-shot per lifecycle — but verify the daemon is actually alive so a
+    // crash doesn't leave the app unable to revive it.
     if ARIA2_HAS_SPAWNED.load(Ordering::SeqCst) {
-        println!("[aria2] Already spawned — skipping");
-        return Ok("already spawned".into());
+        if let Ok(client) = Aria2Client::new() {
+            if client.get_version().await.is_ok() {
+                println!("[aria2] Already spawned — skipping");
+                return Ok("already spawned".into());
+            }
+        }
+        println!("[aria2] Spawned before but not responding — respawning");
+        reset_spawn_state();
     }
 
+    spawn_and_wait(&settings, &app).await
+}
+
+/// Clear the one-shot spawn bookkeeping so a fresh start is allowed
+/// (used after an explicit shutdown / before a (re)start).
+fn reset_spawn_state() {
+    ARIA2_HAS_SPAWNED.store(false, Ordering::SeqCst);
+    ARIA2_SPAWN_GUARD.store(false, Ordering::SeqCst);
+    *ARIA2_LAST_SPAWN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Spawn aria2c and wait until its RPC endpoint answers, then push proxy
+/// credentials. Shared by boot, Start and Restart.
+async fn spawn_and_wait(settings: &ProxySettings, app: &tauri::AppHandle) -> Result<String, String> {
     if ARIA2_SPAWN_GUARD.swap(true, Ordering::SeqCst) {
         println!("[aria2] Spawn already in progress — skipping");
         ARIA2_SPAWN_GUARD.store(false, Ordering::SeqCst);
@@ -92,7 +113,7 @@ pub async fn start_aria2_with_settings(
     }
 
     *ARIA2_LAST_SPAWN.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
-    spawn_aria2(&settings, &app, true)?;
+    spawn_aria2(settings, app, true)?;
     ARIA2_HAS_SPAWNED.store(true, Ordering::SeqCst);
 
     // Wait for aria2 to be ready, then apply proxy credentials via RPC
@@ -114,10 +135,133 @@ pub async fn start_aria2_with_settings(
     };
 
     // Apply proxy credentials via RPC
-    apply_proxy_creds(&settings, &client).await;
+    apply_proxy_creds(settings, &client).await;
 
     ARIA2_SPAWN_GUARD.store(false, Ordering::SeqCst);
     Ok("success".to_string())
+}
+
+/// Start the aria2c daemon from the settings stored in the DB.
+/// No-op when it is already responding.
+#[command]
+pub async fn start_aria2(app: tauri::AppHandle) -> Result<String, String> {
+    if let Ok(client) = Aria2Client::new() {
+        if client.get_version().await.is_ok() {
+            return Ok("aria2 is already running".into());
+        }
+    }
+    let settings = crate::db::load_settings_from_db()?;
+    kill_aria2c();
+    reset_spawn_state();
+    spawn_and_wait(&settings, &app).await?;
+    Ok("aria2 started".to_string())
+}
+
+/// Restart the aria2c daemon from the settings stored in the DB.
+#[command]
+pub async fn restart_aria2(app: tauri::AppHandle) -> Result<String, String> {
+    let settings = crate::db::load_settings_from_db()?;
+    kill_aria2c();
+    reset_spawn_state();
+    // Let the old process release the RPC port before rebinding.
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    spawn_and_wait(&settings, &app).await?;
+    Ok("aria2 restarted".to_string())
+}
+
+/// Gracefully stop the aria2c daemon (RPC shutdown, kill fallback) and clear
+/// the spawn bookkeeping so `start_aria2` can launch it again.
+#[command]
+pub async fn shutdown_aria2() -> Result<String, String> {
+    let graceful = match Aria2Client::new() {
+        Ok(client) => client.shutdown().await.is_ok(),
+        Err(_) => false,
+    };
+    // Reap leftovers either way (graceful shutdown is async server-side).
+    if graceful {
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    }
+    kill_aria2c();
+    reset_spawn_state();
+    if graceful {
+        Ok("aria2 shut down gracefully".to_string())
+    } else {
+        Ok("aria2 process stopped".to_string())
+    }
+}
+
+/// Compare the bundled aria2c version against the latest aria2 GitHub release.
+/// Check-only: engine updates ship with MoonHunt app releases.
+#[command]
+pub async fn check_aria2_update() -> Result<Value, String> {
+    // Local version: live RPC first, `aria2c --version` fallback (works while down).
+    let mut current = String::new();
+    if let Ok(client) = Aria2Client::new() {
+        if let Ok(v) = client.get_version().await {
+            current = v
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+        }
+    }
+    if current.is_empty() {
+        if let Ok(bin) = process::resolve_aria2c_bin() {
+            if let Ok(out) = std::process::Command::new(&bin).arg("--version").output() {
+                // First line looks like "aria2 version 1.37.0".
+                if let Some(ver) = String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().last())
+                {
+                    current = ver.trim().to_string();
+                }
+            }
+        }
+    }
+    if current.is_empty() {
+        return Err("Could not determine local aria2 version".to_string());
+    }
+
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("MoonHunt")
+        .build()
+        .map_err(|e| format!("Failed to build client: {}", e))?;
+    let body: Value = http
+        .get("https://api.github.com/repos/aria2/aria2/releases/latest")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("Update check failed: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("Update check failed: {}", e))?;
+    // aria2 tags look like "release-1.37.0".
+    let tag = body
+        .get("tag_name")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let url = body
+        .get("html_url")
+        .and_then(|u| u.as_str())
+        .unwrap_or("https://github.com/aria2/aria2/releases")
+        .to_string();
+    let normalized = tag.trim_start_matches('v').trim_start_matches("release-");
+    let update_available = match (
+        semver::Version::parse(&current),
+        semver::Version::parse(normalized),
+    ) {
+        (Ok(local), Ok(remote)) => remote > local,
+        _ => false,
+    };
+    Ok(json!({
+        "current": current,
+        "latest": tag,
+        "updateAvailable": update_available,
+        "url": url,
+    }))
 }
 
 // ── Settings → aria2 ──────────────────────────────────────────────
@@ -313,6 +457,29 @@ pub async fn set_download_proxy(
 #[command]
 pub async fn get_aria2_version() -> Result<Value, String> {
     Aria2Client::new()?.get_version().await
+}
+
+/// Absolute path of the resolved aria2c binary (bundled sidecar or system fallback).
+#[command]
+pub fn get_aria2_bin_path() -> Result<String, String> {
+    let path = process::resolve_aria2c_bin()?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Open the folder containing the aria2c binary.
+#[command]
+pub fn open_aria2_location() -> Result<String, String> {
+    let exe_path = process::resolve_aria2c_bin()?;
+    if !exe_path.exists() {
+        return Err("aria2c not installed".to_string());
+    }
+    let target = exe_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| exe_path.clone());
+    tauri_plugin_opener::open_path(&target, None::<&str>)
+        .map_err(|e| format!("Failed to open aria2 folder {}: {}", target.display(), e))?;
+    Ok(format!("Opened aria2 folder: {}", target.display()))
 }
 
 #[command]
