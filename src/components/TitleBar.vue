@@ -150,6 +150,9 @@ const showPreview = computed(() =>
 
 function onSearchInput(value: string) {
   activeIndex.value = -1
+  // Typing implies focus — self-heals any focus-flag desync so the preview
+  // always reopens while there is a query.
+  if (value.trim()) searchFocused.value = true
   emit('update:searchQuery', value)
 }
 
@@ -167,6 +170,10 @@ function onSearchBlur() {
 function selectItem(gid: string) {
   searchFocused.value = false
   activeIndex.value = -1
+  // The item uses mousedown.prevent, so the input keeps DOM focus while the
+  // flag is false — and clicking it again would fire no focus event, leaving
+  // the preview permanently closed. Release focus so the next click refocuses.
+  searchInputRef.value?.blur()
   emit('preview-select', gid)
 }
 

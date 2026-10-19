@@ -33,21 +33,21 @@ export const THEMES: ThemeDef[] = [
 // fail WCAG contrast (1.3-3.4:1) as text on the near-white light background;
 // these keep the hue but reach >=4.5:1. Swapped into --accent-strong.
 export const ACCENT_STRONG: Record<string, string> = {
-  default: '#0078ad',
+  default: '#006fa1',
   cyan: '#0971cd',
   purple: '#7d33a8',
-  green: '#328135',
+  green: '#2d7a30',
   red: '#d20805',
   gold: '#8a6900',
-  orange: '#d63300',
+  orange: '#c62e00',
   pink: '#d1054a',
   gray: '#6b6b6b',
   lemon: '#6a730c',
-  aqua: '#0e7d8b',
+  aqua: '#0d7482',
   'persian-blue': '#227b7c',
-  teal: '#157f75',
+  teal: '#12766e',
   lavender: '#7a4dd2',
-  coral: '#d63300',
+  coral: '#c62e00',
   indigo: '#2634b0',
 }
 

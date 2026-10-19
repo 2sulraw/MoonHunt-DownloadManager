@@ -185,9 +185,9 @@ defineExpose({ open })
   background: var(--bg-card);
   border: 1px solid var(--border-strong);
   border-radius: 14px;
-  width: 320px;
-  max-width: 92vw;
-  max-height: 80vh;
+  width: 380px;
+  max-width: 94vw;
+  max-height: 88vh;
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-lg);
@@ -256,6 +256,18 @@ defineExpose({ open })
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* Visible so the naive date/time popup is never clipped or trapped
+     under the footer buttons — the popup floats above the overlay. */
+  overflow: visible;
+  flex-shrink: 0;
+}
+
+/* Keep the naive datetime popup inside the viewport and above the footer. */
+.sm-body :deep(.n-date-panel) {
+  max-width: calc(100vw - 48px);
+}
+.sm-body :deep(.n-date-panel-calendar__picker) {
+  max-height: 260px;
   overflow-y: auto;
 }
 

@@ -111,6 +111,43 @@
           </div>
         </div>
         <p class="field-hint">{{ t('When enabled, certificates are verified during downloads. Disable only if you encounter certificate errors.') }}</p>
+
+        <div class="section-divider"></div>
+        <h2 class="section-title" style="margin-top: 20px;">{{ t('Download Engine') }}</h2>
+
+        <div class="field row-field">
+          <label>{{ t('Progress Engine') }}</label>
+          <div class="seg-switch" role="group" aria-label="Progress engine">
+            <span class="seg-indicator" :class="{ right: progressEngine === 'experimental' }"></span>
+            <button
+              type="button"
+              class="seg-btn"
+              :class="{ active: progressEngine === 'legacy' }"
+              @click="progressEngine = 'legacy'"
+            >
+              {{ t('Legacy') }}
+            </button>
+            <button
+              type="button"
+              class="seg-btn"
+              :class="{ active: progressEngine === 'experimental' }"
+              @click="progressEngine = 'experimental'"
+            >
+              {{ t('Experimental') }}
+            </button>
+          </div>
+        </div>
+        <p class="field-hint">{{ t('Legacy parses yt-dlp percent text. Experimental counts bytes with a fixed total and updates more often.') }}</p>
+
+        <div class="field row-field">
+          <label>{{ t('Show Download Diagnostics') }}</label>
+          <div class="toggle-row">
+            <div class="toggle" :class="{ active: showDownloadDiagnostics }" @click="showDownloadDiagnostics = !showDownloadDiagnostics" role="switch" :aria-checked="showDownloadDiagnostics">
+              <div class="toggle-track"><div class="toggle-thumb"></div></div>
+            </div>
+          </div>
+        </div>
+        <p class="field-hint">{{ t('Adds a raw diagnostics section (engine, phase, bytes, backend health) to the download Details modal.') }}</p>
       </section>
 
       <section v-show="activeCategory === 'aria2c'" class="settings-section">
@@ -140,13 +177,12 @@
         <div class="field">
           <label>{{ t('Installed Location') }}</label>
           <div class="nd-input-wrap nd-input-wrap--token">
-            <input v-model="aria2BinPath" readonly class="nd-input nd-path-input nd-token-input" :placeholder="t('Locating aria2c…')" />
+            <input v-model="aria2BinPath" readonly class="nd-input nd-path-input nd-location-input" :placeholder="t('Locating aria2c…')" />
             <button @click="openAria2Location" class="nd-input-action nd-hide-btn" :title="t('Open folder')" :aria-label="t('Open folder')"><i class="material-icons">folder_open</i></button>
             <button @click="copyToClipboard(aria2BinPath)" class="nd-input-action" :title="t('Copy to clipboard')" :aria-label="t('Copy to clipboard')"><i class="material-icons">content_copy</i></button>
           </div>
         </div>
 
-        <div class="section-divider"></div>
         <div class="field">
           <label>{{ t('Engine Controls') }}</label>
           <div class="aria2-controls">
@@ -175,6 +211,18 @@
             <i class="material-icons">{{ aria2Update.updateAvailable ? 'update' : 'check_circle' }}</i>
             <span>{{ t('Installed:') }} {{ aria2Update.current }} · {{ t('Latest:') }} {{ aria2Update.latest || '—' }} — {{ aria2Update.updateAvailable ? t('Update available (ships with app updates)') : t('Up to date') }}</span>
             <button v-if="aria2Update.url" @click="openAria2Release" class="btn-detect" style="margin-left: auto;">{{ t('Releases') }}</button>
+          </div>
+        </div>
+
+        <div class="section-divider"></div>
+        <h2 class="section-title" style="margin-top: 20px;">{{ t('RPC Configuration') }}</h2>
+        <p class="section-sub">{{ t('aria2 RPC server settings.') }}</p>
+
+        <div class="field">
+          <label>{{ t('RPC Port') }}</label>
+          <div class="nd-input-wrap">
+            <input v-model.number="rpcPort" type="number" min="1" max="65535" class="nd-input nd-path-input" />
+            <button @click="copyToClipboard(rpcPort.toString())" class="nd-input-action" :title="t('Copy to clipboard')"><i class="material-icons">content_copy</i></button>
           </div>
         </div>
       </section>
@@ -280,12 +328,18 @@
 
         <div class="field">
           <label>{{ t('Torrent Download Location') }}</label>
-          <div class="nd-input-wrap">
-            <input v-model="torrentDownloadLocation" class="nd-input nd-path-input" :placeholder="t('Default torrent download location')" />
-            <button @click="selectTorrentDownloadLocation" class="nd-input-action">
-              <i class="material-icons">folder_open</i>
-            </button>
+          <div class="torrent-location-row">
+            <div class="nd-input-wrap">
+              <input v-model="torrentDownloadLocation" :disabled="!torrentCustomLocation" class="nd-input nd-path-input" :placeholder="torrentCustomLocation ? t('Default torrent download location') : (downloadLocation || t('Follows URL Downloads location'))" />
+              <button @click="selectTorrentDownloadLocation" :disabled="!torrentCustomLocation" class="nd-input-action">
+                <i class="material-icons">folder_open</i>
+              </button>
+            </div>
+            <div class="toggle" :class="{ active: torrentCustomLocation }" @click="torrentCustomLocation = !torrentCustomLocation" role="switch" :aria-checked="torrentCustomLocation" :title="torrentCustomLocation ? t('Using an independent location') : t('Following URL Downloads location')">
+              <div class="toggle-track"><div class="toggle-thumb"></div></div>
+            </div>
           </div>
+          <p v-if="!torrentCustomLocation" class="field-hint">{{ t('Off — torrents follow the URL Downloads location.') }}</p>
         </div>
 
         <div class="field">
@@ -405,19 +459,6 @@
         <div v-else class="proxy-disabled-hint">
           <i class="material-icons">info_outline</i>
           <span>{{ t('Proxy is disabled. Enable it if your ISP blocks certain sites.') }}</span>
-        </div>
-      </section>
-
-      <section v-show="activeCategory === 'network'" class="settings-section">
-        <h2 class="section-title">{{ t('RPC Configuration') }}</h2>
-        <p class="section-sub">{{ t('aria2 RPC server settings.') }}</p>
-
-        <div class="field">
-          <label>{{ t('RPC Port') }}</label>
-          <div class="nd-input-wrap">
-            <input v-model.number="rpcPort" type="number" min="1" max="65535" class="nd-input nd-path-input" />
-            <button @click="copyToClipboard(rpcPort.toString())" class="nd-input-action" :title="t('Copy to clipboard')"><i class="material-icons">content_copy</i></button>
-          </div>
         </div>
       </section>
 
@@ -1062,6 +1103,54 @@
 
 .speed-unit-btn.active {
   background: rgba(var(--accent-rgb), 0.12);
+  color: var(--accent-strong);
+}
+
+/* Segmented sliding switch (Progress Engine) — mirrors the Media page tabs. */
+.seg-switch {
+  position: relative;
+  display: flex;
+  padding: 4px;
+  background: var(--hover-bg);
+  border-radius: 10px;
+  min-width: 240px;
+}
+.seg-indicator {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: calc(50% - 6px);
+  height: calc(100% - 8px);
+  background: var(--bg-card);
+  border-radius: 7px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18), inset 0 0 0 1px var(--border);
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 0;
+  pointer-events: none;
+}
+.seg-indicator.right {
+  transform: translateX(calc(100% + 4px));
+}
+.seg-btn {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  height: 30px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color 0.15s ease;
+  white-space: nowrap;
+}
+.seg-btn:hover:not(.active) {
+  color: var(--text-muted);
+}
+.seg-btn.active {
   color: var(--accent-strong);
 }
 
@@ -2301,7 +2390,7 @@ input[type="number"] {
   background: #0a0e1a;
 }
 .light-preview {
-  background: #f0ebe4;
+  background: #f4f5f7;
 }
 .linear-preview {
   background: #08090a;
@@ -2313,7 +2402,7 @@ input[type="number"] {
   width: 40%;
 }
 .preview-bar.light {
-  background: #fffcf8;
+  background: #ffffff;
 }
 .preview-bar.linear {
   background: #191a1b;
@@ -2330,7 +2419,8 @@ input[type="number"] {
   width: 100%;
 }
 .preview-line.light {
-  background: #f7f3ed;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px rgba(20, 24, 34, 0.08);
 }
 .preview-line.linear {
   background: #0f1011;
@@ -2435,6 +2525,37 @@ input.nd-input:-webkit-autofill:focus {
   color: var(--accent-strong);
 }
 
+.nd-input-action:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.nd-input-action:disabled:hover {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+input.nd-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Torrent location row: shorter input with the follow/custom toggle fitted right. */
+.torrent-location-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.torrent-location-row .nd-input-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.torrent-location-row .toggle {
+  flex-shrink: 0;
+}
+
 input.nd-path-input {
   padding-right: 36px;
   cursor: default;
@@ -2447,6 +2568,11 @@ input.nd-path-input {
 
 .nd-hide-btn {
   right: 42px;
+}
+
+/* Installed-location field: two trailing buttons, no lead button. */
+input.nd-location-input {
+  padding-right: 72px;
 }
 
 .nd-input-lead {
@@ -2552,6 +2678,8 @@ const protocolRegistered = ref(false)
 
 const verifySsl = ref(true)
 const searchPreviewEnabled = ref(true)
+const progressEngine = ref<'legacy' | 'experimental'>('legacy')
+const showDownloadDiagnostics = ref(false)
 const hardwareAccel = ref(true)
 const debugLogging = ref(false)
 const i18n = useI18n()
@@ -2565,6 +2693,7 @@ function onLanguageChange(code: string) {
 
 // Torrent settings
 const torrentDownloadLocation = ref('')
+const torrentCustomLocation = ref(false)
 const torrentMaxConnections = ref(64)
 const torrentDhtEnabled = ref(true)
 const torrentAutoStart = ref(true)
@@ -3058,6 +3187,8 @@ const DEFAULT_SETTINGS = {
   globalSpeedLimitEnabled: false,
   verifySsl: true,
   searchPreviewEnabled: true,
+  progressEngine: 'legacy' as 'legacy' | 'experimental',
+  showDownloadDiagnostics: false,
   proxyType: 'none',
   proxyHost: '',
   proxyPort: 1080,
@@ -3105,6 +3236,8 @@ async function loadSettings() {
       syncSpeedLimitInput()
       verifySsl.value = saved.verifySsl ?? DEFAULT_SETTINGS.verifySsl
       searchPreviewEnabled.value = saved.searchPreviewEnabled ?? DEFAULT_SETTINGS.searchPreviewEnabled
+      progressEngine.value = saved.progressEngine === 'experimental' ? 'experimental' : 'legacy'
+      showDownloadDiagnostics.value = saved.showDownloadDiagnostics ?? DEFAULT_SETTINGS.showDownloadDiagnostics
       proxyType.value = saved.proxyType || DEFAULT_SETTINGS.proxyType
       proxyHost.value = saved.proxyHost || DEFAULT_SETTINGS.proxyHost
       proxyPort.value = saved.proxyPort ?? DEFAULT_SETTINGS.proxyPort
@@ -3135,6 +3268,7 @@ async function loadSettings() {
       syncInputFromBytes(dlLimitUnit.value)
       // Torrent settings
       torrentDownloadLocation.value = saved.torrentDownloadLocation || ''
+      torrentCustomLocation.value = !!torrentDownloadLocation.value.trim()
       torrentMaxConnections.value = saved.torrentMaxConnections ?? 64
       torrentDhtEnabled.value = saved.torrentDhtEnabled ?? true
       torrentAutoStart.value = saved.torrentAutoStart ?? true
@@ -3171,6 +3305,8 @@ async function resetToDefaults() {
     dlLimitUnit.value = DEFAULT_SETTINGS.downloadLimitUnit
     verifySsl.value = DEFAULT_SETTINGS.verifySsl
     searchPreviewEnabled.value = DEFAULT_SETTINGS.searchPreviewEnabled
+    progressEngine.value = DEFAULT_SETTINGS.progressEngine
+    showDownloadDiagnostics.value = DEFAULT_SETTINGS.showDownloadDiagnostics
     hardwareAccel.value = true
     language.value = 'en'
     setLocale('en')
@@ -3178,6 +3314,7 @@ async function resetToDefaults() {
     syncInputFromBytes(DEFAULT_SETTINGS.downloadLimitUnit)
     // Torrent defaults
     torrentDownloadLocation.value = DEFAULT_SETTINGS.torrentDownloadLocation
+    torrentCustomLocation.value = false
     torrentMaxConnections.value = DEFAULT_SETTINGS.torrentMaxConnections
     torrentDhtEnabled.value = DEFAULT_SETTINGS.torrentDhtEnabled
     torrentAutoStart.value = DEFAULT_SETTINGS.torrentAutoStart
@@ -3215,6 +3352,8 @@ async function saveSettings() {
     globalSpeedLimitEnabled: speedLimitEnabled.value,
     verifySsl: verifySsl.value,
     searchPreviewEnabled: searchPreviewEnabled.value,
+    progressEngine: progressEngine.value,
+    showDownloadDiagnostics: showDownloadDiagnostics.value,
     proxyType: proxyEnabled.value ? proxyType.value : 'none',
     proxyHost: proxyHost.value,
     proxyPort: proxyPort.value,
@@ -3231,7 +3370,7 @@ async function saveSettings() {
     downloadLimitUnit: dlLimitUnit.value,
     disableHardwareAcceleration: !hardwareAccel.value,
     debugLogging: debugLogging.value,
-    torrentDownloadLocation: torrentDownloadLocation.value,
+    torrentDownloadLocation: torrentCustomLocation.value ? torrentDownloadLocation.value : '',
     torrentMaxConnections: torrentMaxConnections.value,
     torrentDhtEnabled: torrentDhtEnabled.value,
     torrentAutoStart: torrentAutoStart.value,

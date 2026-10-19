@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ACCENT_STRONG, THEMES, resolveThemeSelection } from '../useTheme'
 
-const LIGHT_BG = '#faf6f0'
+const LIGHT_BG = '#f4f5f7'
 
 function lum(hex: string): number {
   const h = hex.replace('#', '')

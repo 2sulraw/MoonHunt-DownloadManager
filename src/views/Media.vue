@@ -788,6 +788,9 @@ onMounted(async () => {
 
   try {
     ytStartUnlisten.value = await listen<{ gid: string; filename: string; url?: string }>('yt-dl-started', () => {
+      // Ignore stale starts (e.g. the user cancelled while the backend kept
+      // running) — only a pending download-start may claim the modal.
+      if (downloadState.value !== 'downloading') return
       handleYtStarted()
     })
   } catch (e) { console.warn(e) }
@@ -814,10 +817,8 @@ onMounted(async () => {
 })
 
 onActivated(() => {
-  void refreshYtDlpState()
-  void refreshEjsState()
-  void loadJsRuntimes()
-  void loadMergers()
+  // One concurrent pass instead of four sequential IPC storms on every visit.
+  void Promise.allSettled([refreshYtDlpState(), refreshEjsState(), loadJsRuntimes(), loadMergers()])
 })
 
 onBeforeUnmount(() => {
@@ -865,6 +866,9 @@ async function start() {
         const audio = visibleFormats.value.find(f => f.has_audio && !f.has_video)
         if (audio) selectedFormatId.value = audio.format_id
       }
+      ytLog.value.push(
+        `[scan] ${res.formats.length} format(s) found | merger ${res.mergerAvailable ? 'available' : 'missing'} | auto-selected: ${selectedFormatId.value ?? 'none'}`,
+      )
     } catch (err: unknown) {
       if (taskId !== activeTaskId) return
       activeScanId.value = null
@@ -892,8 +896,13 @@ async function downloadWithFormat() {
   downloadState.value = 'downloading'
   ytLog.value = []
   ytStarted.value = false
+  // State the real selection up front — never a hardcoded "quality=best".
+  ytLog.value.push(
+    `[pick] ${sel?.label ?? selectedFormatId.value} | format_id=${selectedFormatId.value} | container=${fmt} | video=${sel?.has_video ?? '?'} audio=${sel?.has_audio ?? '?'}${sel?.filesize ? ` | ~${formatBytes(sel.filesize)}` : ''}`,
+    `[pick] save to: ${path.value || '(default downloads folder)'} | cookies: ${selectedBrowser.value}`,
+  )
   try {
-    await invoke('add_yt_download', { url: dialedUrl.value, format: fmt, quality: undefined, path: path.value || undefined, browser: selectedBrowser.value, format_id: selectedFormatId.value })
+    await invoke('add_yt_download', { url: dialedUrl.value, format: fmt, quality: undefined, path: path.value || undefined, browser: selectedBrowser.value, format_id: selectedFormatId.value, has_video: sel?.has_video, has_audio: sel?.has_audio })
     if (taskId !== activeTaskId) return
     handleYtStarted()
   } catch (err: unknown) {

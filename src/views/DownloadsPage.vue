@@ -1,6 +1,13 @@
 ﻿<!-- Downloads page -- list/grid view, add download dialog, schedule modal -->
 <template>
   <div class="downloads-page">
+    <transition name="dm-tip-fade">
+      <div
+        v-if="copyTip"
+        class="dm-copy-tip"
+        :style="{ left: copyTip.x + 'px', top: copyTip.y + 'px' }"
+      >{{ copyTip.text }}</div>
+    </transition>
     <!-- Hero Section (copied from SettingsPage) -->
     <section class="settings-hero">
       <div class="hero-left">
@@ -1147,7 +1154,7 @@
                   <i class="material-icons">{{ getStatusIcon(selectedDownload?.status) }}</i>
                   <span>{{ capitalizeStatus(selectedDownload?.status) }}</span>
                 </span>
-                <button class="dm-icon-btn" @click="copyToClipboard(selectedDownload?.gid)" :title="t('Copy GID')">
+                <button class="dm-icon-btn" @mouseenter="showCopyTip(t('Copy GID'), $event)" @mouseleave="hideCopyTip()" @click="copyToClipboard(selectedDownload?.gid, $event)">
                   <i class="material-icons">content_copy</i>
                 </button>
                 <button class="dm-icon-btn dm-close" @click="showDetailsModal = false" :aria-label="t('Close')">
@@ -1162,9 +1169,6 @@
               </button>
               <button role="tab" class="dm-tab" :class="{ active: activeDetailsTab === 'network' }" @click="activeDetailsTab = 'network'">
                 <i class="material-icons">dns</i><span>{{ t('Network') }}</span>
-              </button>
-              <button role="tab" class="dm-tab" :class="{ active: activeDetailsTab === 'history' }" @click="activeDetailsTab = 'history'">
-                <i class="material-icons">history</i><span>{{ t('History') }}</span>
               </button>
               <button role="tab" class="dm-tab" :class="{ active: activeDetailsTab === 'log' }" @click="loadDownloadEvents(); activeDetailsTab = 'log'">
                 <i class="material-icons">terminal</i><span>{{ t('Log') }}</span>
@@ -1190,10 +1194,10 @@
                         <th>{{ t('Progress') }}</th>
                         <td class="dm-progress-cell">
                           <div class="dm-progress-wrap">
-                            <div class="dm-progress-track" role="progressbar" :aria-valuenow="selectedDownload?.progress || 0" aria-valuemin="0" aria-valuemax="100">
-                              <div class="dm-progress-fill" :style="{ width: (selectedDownload?.progress || 0) + '%' }"></div>
+                            <div class="dm-progress-track" role="progressbar" :aria-valuenow="Math.min(100, Math.max(0, selectedDownload?.progress || 0))" aria-valuemin="0" aria-valuemax="100">
+                              <div class="dm-progress-fill" :class="{ experimental: selectedDownload?.engine === 'experimental' }" :style="{ width: Math.min(100, Math.max(0, selectedDownload?.progress || 0)) + '%' }"></div>
                             </div>
-                            <span class="dm-progress-pct">{{ selectedDownload?.progress || 0 }}%</span>
+                            <span class="dm-progress-pct">{{ Math.min(100, Math.max(0, selectedDownload?.progress || 0)) }}%<span v-if="selectedDownload?.phase === 'merging'"> · {{ t('merging') }}</span></span>
                           </div>
                         </td>
                       </tr>
@@ -1226,7 +1230,11 @@
                       </tr>
                       <tr>
                         <th>{{ t('Active Connections') }}</th>
-                        <td>{{ selectedDownload?.activeConnections || 1 }}</td>
+                        <td>
+                          <span class="dm-chip"><i class="material-icons">device_hub</i>
+                            {{ selectedDownload?.activeConnections || 1 }}
+                          </span>
+                        </td>
                       </tr>
                       <tr>
                         <th>{{ t('Priority') }}</th>
@@ -1259,20 +1267,27 @@
                   </div>
                   <div v-else-if="selectedDownloadDetails?.files?.length" class="dm-file-table-wrapper">
                     <table class="dm-file-table">
+                      <colgroup>
+                        <col style="width: 30%" />
+                        <col style="width: 13%" />
+                        <col style="width: 19%" />
+                        <col style="width: 38%" />
+                      </colgroup>
                       <thead>
                         <tr>
                           <th>{{ t('File') }}</th>
                           <th>{{ t('Size') }}</th>
                           <th>{{ t('Progress') }}</th>
                           <th>{{ t('Path') }}</th>
-                          <th></th>
                         </tr>
                       </thead>
                       <tbody>
                         <tr v-for="(file, i) in selectedDownloadDetails.files" :key="i">
-                          <td class="dm-file-name-cell">
-                            <i class="material-icons" :class="getFileIcon(file.path)">{{ getFileIcon(file.path) }}</i>
-                            <span class="dm-file-name">{{ file.path?.split(/[\\/]/).pop() || file.path }}</span>
+                          <td>
+                            <div class="dm-file-name-cell">
+                              <i class="material-icons" :class="getFileIcon(file.path)">{{ getFileIcon(file.path) }}</i>
+                              <span class="dm-file-name" :title="file.path?.split(/[\\/]/).pop() || file.path">{{ file.path?.split(/[\\/]/).pop() || file.path }}</span>
+                            </div>
                           </td>
                           <td>{{ formatFileSize(Number(file.length) || 0) }}</td>
                           <td class="dm-file-progress-cell">
@@ -1284,11 +1299,13 @@
                             </div>
                             <span v-else>—</span>
                           </td>
-                          <td class="dm-path-cell" :title="file.path">{{ file.path }}</td>
                           <td>
-                            <button class="dm-icon-btn" @click="copyToClipboard(file.path)" :title="t('Copy path')">
-                              <i class="material-icons">content_copy</i>
-                            </button>
+                            <div class="dm-path-cell">
+                              <span class="dm-path-text" :title="file.path">{{ shortenPath(file.path) }}</span>
+                              <button class="dm-icon-btn sm" @mouseenter="showCopyTip(t('Copy path'), $event)" @mouseleave="hideCopyTip()" @click="copyToClipboard(file.path, $event)">
+                                <i class="material-icons">content_copy</i>
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       </tbody>
@@ -1309,20 +1326,24 @@
                     <tbody>
                       <tr>
                         <th>{{ t('URL') }}</th>
-                        <td class="dm-url-cell">
-                          <span class="dm-url-text">{{ selectedDownload?.url || selectedDownload?.uri || 'â€"' }}</span>
-                          <button v-if="selectedDownload?.url || selectedDownload?.uri" class="dm-icon-btn" @click="copyToClipboard(selectedDownload?.url || selectedDownload?.uri)" :title="t('Copy URL')">
-                            <i class="material-icons">content_copy</i>
-                          </button>
+                        <td>
+                          <div class="dm-url-cell">
+                            <span class="dm-url-text" :title="selectedDownload?.url || selectedDownload?.uri">{{ selectedDownload?.url || selectedDownload?.uri || '—' }}</span>
+                            <button v-if="selectedDownload?.url || selectedDownload?.uri" class="dm-icon-btn" @mouseenter="showCopyTip(t('Copy URL'), $event)" @mouseleave="hideCopyTip()" @click="copyToClipboard(selectedDownload?.url || selectedDownload?.uri, $event)">
+                              <i class="material-icons">content_copy</i>
+                            </button>
+                          </div>
                         </td>
                       </tr>
                       <tr>
                         <th>{{ t('Folder') }}</th>
-                        <td class="dm-path-cell" :title="getDownloadFolder()">
-                          {{ getDownloadFolder() }}
-                          <button class="dm-icon-btn" @click="copyToClipboard(getDownloadFolder())" :title="t('Copy path')">
-                            <i class="material-icons">content_copy</i>
-                          </button>
+                        <td>
+                          <div class="dm-path-cell">
+                            <span class="dm-path-text" :title="getDownloadFolder()">{{ shortenPath(getDownloadFolder()) }}</span>
+                            <button class="dm-icon-btn" @mouseenter="showCopyTip(t('Copy path'), $event)" @mouseleave="hideCopyTip()" @click="copyToClipboard(getDownloadFolder(), $event)">
+                              <i class="material-icons">content_copy</i>
+                            </button>
+                          </div>
                         </td>
                       </tr>
                       <tr v-if="selectedDownload?.source === 'yt-dlp'">
@@ -1337,41 +1358,61 @@
                   <ul class="dm-source-list">
                     <li v-for="(src, i) in selectedDownloadDetails.source" :key="i">
                       <span class="dm-source-item">{{ src }}</span>
-                      <button class="dm-icon-btn sm" @click="copyToClipboard(src)" :title="t('Copy')"><i class="material-icons">content_copy</i></button>
+                      <button class="dm-icon-btn sm" @mouseenter="showCopyTip(t('Copy'), $event)" @mouseleave="hideCopyTip()" @click="copyToClipboard(src, $event)"><i class="material-icons">content_copy</i></button>
                     </li>
                   </ul>
                 </div>
 
                 <div class="dm-section">
                   <h3 class="dm-section-title">{{ t('Proxy') }}</h3>
-                  <ProxyField v-model="detailProxy" />
-                  <div class="dm-proxy-actions">
-                    <button class="dm-proxy-save" @click="applyDetailProxy" :disabled="proxyApplying">
-                      <i v-if="proxyApplying" class="material-icons nd-spinner">hourglass_top</i>
-                      <i v-else class="material-icons">save</i>
-                      {{ proxyApplying ? t('Saving...') : t('Save') }}
-                    </button>
-                    <span v-if="proxySaveMessage" class="dm-proxy-message" :class="{ ok: proxySaveOk }">{{ proxySaveMessage }}</span>
-                  </div>
+                  <ProxyField v-model="detailProxy">
+                    <template #actions>
+                      <!-- Toggle-off auto-applies (watch below), so the Apply
+                           button is only needed when the proxy is enabled. -->
+                      <div v-if="detailProxy.enabled" class="dm-proxy-actions">
+                        <button class="dm-proxy-save" @click="() => applyDetailProxy()" :disabled="proxyApplying">
+                          <i v-if="proxyApplying" class="material-icons nd-spinner">hourglass_top</i>
+                          <i v-else class="material-icons">check</i>
+                          {{ proxyApplying ? t('Applying...') : t('Apply') }}
+                        </button>
+                        <span v-if="proxySaveMessage" class="dm-proxy-message" :class="{ ok: proxySaveOk }">{{ proxySaveMessage }}</span>
+                      </div>
+                      <span v-else-if="proxySaveMessage" class="dm-proxy-message" :class="{ ok: proxySaveOk }">{{ proxySaveMessage }}</span>
+                    </template>
+                  </ProxyField>
                 </div>
               </section>
 
-              <section v-if="activeDetailsTab === 'history'" class="dm-panel" role="tabpanel">
-                <div class="dm-section">
-                  <h3 class="dm-section-title">{{ t('Timeline') }}</h3>
-                  <table class="dm-table">
+              <section v-if="activeDetailsTab === 'log'" class="dm-panel" role="tabpanel">
+                <div class="dm-timeline-line">
+                  <i class="material-icons">history</i>
+                  <span>{{ t('Added') }} {{ formatDateTime(selectedDownload?.added_at) }}</span>
+                  <span v-if="selectedDownloadDetails?.startTime"> · {{ t('Started') }} {{ formatDateTime(selectedDownloadDetails?.startTime) }}</span>
+                  <span v-if="selectedDownloadDetails?.completionTime"> · {{ t('Completed') }} {{ formatDateTime(selectedDownloadDetails?.completionTime) }}</span>
+                </div>
+                <div v-if="showDiagnostics" class="dm-section dm-debug">
+                  <h3 class="dm-section-title dm-debug-title">{{ t('Diagnostics (debug)') }}</h3>
+                  <table class="dm-table dm-debug-table">
                     <tbody>
                       <tr>
-                        <th>{{ t('Added') }}</th>
-                        <td>{{ formatDateTime(selectedDownload?.added_at) }}</td>
+                        <th>{{ t('Engine') }}</th>
+                        <td>{{ selectedDownload?.engine || 'legacy' }}<span v-if="selectedDownload?.phase"> · {{ selectedDownload.phase }}</span></td>
                       </tr>
-                      <tr v-if="selectedDownloadDetails?.startTime">
-                        <th>{{ t('Started') }}</th>
-                        <td>{{ formatDateTime(selectedDownloadDetails?.startTime) }}</td>
+                      <tr>
+                        <th>{{ t('Raw bytes') }}</th>
+                        <td>{{ diagCompleted }} / {{ diagTotal }}</td>
                       </tr>
-                      <tr v-if="selectedDownloadDetails?.completionTime">
-                        <th>{{ t('Completed') }}</th>
-                        <td>{{ formatDateTime(selectedDownloadDetails?.completionTime) }}</td>
+                      <tr>
+                        <th>{{ t('Computed') }}</th>
+                        <td>{{ diagComputedPct }}%</td>
+                      </tr>
+                      <tr>
+                        <th>{{ t('Last event') }}</th>
+                        <td>{{ diagEventAge }}</td>
+                      </tr>
+                      <tr v-if="isDirectYtDlp(selectedDownload?.gid)">
+                        <th>{{ t('Backend') }}</th>
+                        <td>{{ ytHealth === null ? '…' : (ytHealth ? t('process alive') : t('process exited')) }}</td>
                       </tr>
                     </tbody>
                   </table>
@@ -1380,15 +1421,12 @@
                   <h3 class="dm-section-title"><i class="material-icons">error_outline</i> {{ t('Error') }}</h3>
                   <div class="dm-error-box">
                     <pre>{{ selectedDownloadDetails.errorMessage }}</pre>
-                    <button class="dm-btn-secondary" @click="copyToClipboard(selectedDownloadDetails.errorMessage)">
+                    <button class="dm-btn-secondary" @mouseenter="showCopyTip(t('Copy error'), $event)" @mouseleave="hideCopyTip()" @click="copyToClipboard(selectedDownloadDetails.errorMessage, $event)">
                       <i class="material-icons">content_copy</i> {{ t('Copy error') }}
                     </button>
                   </div>
                 </div>
-              </section>
-
-              <section v-if="activeDetailsTab === 'log'" class="dm-panel" role="tabpanel">
-                <div v-if="downloadEvents.length === 0" class="dm-empty">
+                <div v-if="downloadEvents.length === 0 && !selectedDownloadDetails?.errorMessage" class="dm-empty">
                   <i class="material-icons">terminal</i>
                   <p>{{ t('No events recorded yet') }}</p>
                 </div>
@@ -1400,7 +1438,7 @@
                     </svg>
                     <div class="dm-log-health-text">
                       <span class="dm-log-health-pct">{{ Math.round(logPacketLoss.health * 100) }}%</span>
-                      <span class="dm-log-health-label">{{ t('Packets') }}</span>
+                      <span class="dm-log-health-label">{{ logPacketLoss.errors > 0 ? t('Timeouts') : t('Packets') }}</span>
                     </div>
                   </div>
                   <div class="dm-log-list">
@@ -2055,9 +2093,10 @@ const sortedDownloads = computed(() => {
   } else if (sort === 'completed') {
     list.sort((a, b) => (a.added_at || 0) - (b.added_at || 0))
   } else if (sort === 'manual' && customOrder.value.length > 0) {
+    const posByGid = new Map(customOrder.value.map((gid, i) => [gid, i]))
     list.sort((a, b) => {
-      const aPos = customOrder.value.indexOf(a.gid)
-      const bPos = customOrder.value.indexOf(b.gid)
+      const aPos = posByGid.get(a.gid) ?? -1
+      const bPos = posByGid.get(b.gid) ?? -1
       if (aPos !== -1 && bPos !== -1) return aPos - bPos
       if (aPos !== -1) return -1
       if (bPos !== -1) return 1
@@ -2088,13 +2127,17 @@ const groupedDownloads = computed<GroupedItem[]>(() => {
   const sort = sortOption.value
 
   const memberGidSet = new Set(groups.value.flatMap((g) => g.memberGids))
+  // Index map + per-group member sets: avoids O(G·N) includes/indexOf scans
+  // on every poll tick (~1/s while active).
+  const indexByGid = new Map(sortedDownloads.value.map((d, i) => [d.gid, i]))
 
   const groupEntries: GroupEntry[] = groups.value.map((group) => {
+    const memberSet = new Set(group.memberGids)
     const groupDownloads = sortedDownloads.value
-      .filter((d) => group.memberGids.includes(d.gid))
+      .filter((d) => memberSet.has(d.gid))
       .map((d) => ({
         download: d,
-        flatIndex: sortedDownloads.value.indexOf(d),
+        flatIndex: indexByGid.get(d.gid) ?? -1,
       }))
     const earliestMemberAdded = groupDownloads.reduce(
       (min, d) => Math.min(min, d.download.added_at || Number.POSITIVE_INFINITY),
@@ -2132,7 +2175,7 @@ const groupedDownloads = computed<GroupedItem[]>(() => {
         items.push({
           type: 'download',
           download,
-          flatIndex: sortedDownloads.value.indexOf(download),
+          flatIndex: indexByGid.get(download.gid) ?? -1,
         })
       }
     }
@@ -2625,12 +2668,19 @@ async function setupTauriDragDrop() {
 
 onMounted(() => {
   setupTauriDragDrop().catch((err) => console.error('Failed to setup drag-drop listener:', err))
+  void loadShowDiagnostics()
+  window.addEventListener('moonhunt:settings-changed', loadShowDiagnosticsListener)
 })
 
 onUnmounted(() => {
   dragDropUnlisten.forEach((fn) => { try { fn() } catch { /* */ } })
   dragDropUnlisten = []
+  window.removeEventListener('moonhunt:settings-changed', loadShowDiagnosticsListener)
 })
+
+function loadShowDiagnosticsListener() {
+  void loadShowDiagnostics()
+}
 
 function clearTorrentFile() {
   clearTorrentFiles()
@@ -3053,6 +3103,12 @@ async function executeGroupAction(action: string) {
 }
 
 watch(downloads, () => {
+  // Keep the open Details modal live: refresh the selected row so progress,
+  // phase/engine and diagnostics track every downloads-changed event.
+  if (selectedDownload.value) {
+    const fresh = downloads.value.find((d) => d.gid === selectedDownload.value?.gid)
+    if (fresh) selectedDownload.value = fresh
+  }
   const eligibleGroups = groups.value.filter(
     (group) =>
       group.onComplete &&
@@ -3134,12 +3190,72 @@ const activeDetailsTab = ref('general')
 const detailsLoading = ref(false)
 const downloadEvents = ref<DownloadEvent[]>([])
 
+// Diagnostics (debug) section: gated by General > Show Download Diagnostics.
+const showDiagnostics = ref(false)
+const ytHealth = ref<boolean | null>(null)
+
+function isDirectYtDlp(gid: string | undefined): boolean {
+  return !!gid && gid.startsWith('yt-dlp-direct-')
+}
+
+async function loadShowDiagnostics() {
+  try {
+    const s = await invoke<any>('get_all_settings', {})
+    showDiagnostics.value = !!s?.showDownloadDiagnostics
+  } catch {
+    showDiagnostics.value = false
+  }
+}
+
+async function loadYtHealth() {
+  ytHealth.value = null
+  const gid = selectedDownload.value?.gid
+  if (!gid || !isDirectYtDlp(gid)) return
+  try {
+    const h = await invoke<{ alive: boolean }>('get_yt_download_health', { gid })
+    ytHealth.value = !!h?.alive
+  } catch {
+    ytHealth.value = null
+  }
+}
+
+const diagTotal = computed(() => {
+  const d = selectedDownload.value
+  if (!d) return '—'
+  const v = d.peakTotal ?? d.total
+  return v && v > 0 ? formatFileSize(v) : '—'
+})
+
+const diagCompleted = computed(() => {
+  const d = selectedDownload.value
+  if (!d) return '—'
+  if (d.peakCompleted != null && d.peakTotal) return formatFileSize(d.peakCompleted)
+  return d.size?.split(' / ')[0] || '—'
+})
+
+const diagComputedPct = computed(() => {
+  const d = selectedDownload.value
+  if (!d) return 0
+  if (d.peakTotal && d.peakTotal > 0 && d.peakCompleted != null) {
+    return Math.min(100, Math.round((d.peakCompleted / d.peakTotal) * 100))
+  }
+  return Math.min(100, Math.max(0, d.progress || 0))
+})
+
+const diagEventAge = computed(() => {
+  const at = selectedDownload.value?.lastEventAt
+  if (!at) return '—'
+  const ms = Date.now() - at
+  if (ms < 1000) return `${ms} ms ago`
+  return `${(ms / 1000).toFixed(1)} s ago`
+})
+
 const logPacketLoss = computed(() => {
-  const errors = downloadEvents.value.filter(e => e.eventType === 'error').length
-  const samples = downloadEvents.value.filter(e => e.eventType === 'speed_sample').length
-  const total = errors + samples
-  if (total === 0) return { health: 1, errors: 0, total: 0 }
-  return { health: 1 - errors / total, errors, total }
+  // Pure timeout accounting now that per-5s speed samples are gone:
+  // every recorded connection drop dents the health ring (10 → dead).
+  const timeouts = downloadEvents.value.filter(e => e.eventType === 'timeout').length
+  if (timeouts === 0) return { health: 1, errors: 0, total: 0 }
+  return { health: Math.max(0, 1 - timeouts * 0.1), errors: timeouts, total: timeouts }
 })
 
 function formatLogTime(ts: number) {
@@ -3164,6 +3280,7 @@ function showDownloadDetails(download: Download) {
   proxySaveMessage.value = ''
   proxySaveOk.value = false
   showDetailsModal.value = true
+  void loadYtHealth()
   // Fetch detailed info
   invoke<any>('get_download_details', { gid: download.gid }).then(details => {
     selectedDownloadDetails.value = details
@@ -3176,11 +3293,16 @@ function showDownloadDetails(download: Download) {
 
 // Per-download proxy editor in the details modal Network tab.
 const detailProxy = ref<ProxyFormValue>(emptyProxyForm())
+// Toggling the proxy off silently saves immediately (the toggle itself is the
+// confirmation). The saved message is reserved for the Apply button.
+watch(() => detailProxy.value.enabled, (enabled, was) => {
+  if (was && !enabled) void applyDetailProxy(true)
+})
 const proxyApplying = ref(false)
 const proxySaveMessage = ref('')
 const proxySaveOk = ref(false)
 
-async function applyDetailProxy() {
+async function applyDetailProxy(silent = false) {
   const gid = selectedDownload.value?.gid
   if (!gid || proxyApplying.value) return
   proxyApplying.value = true
@@ -3197,12 +3319,14 @@ async function applyDetailProxy() {
         proxy_pass: detailProxy.value.pass,
       },
     })
-    proxySaveOk.value = true
-    proxySaveMessage.value = t('Settings saved successfully!')
     if (selectedDownload.value) {
       selectedDownload.value.proxy = serializeProxy(detailProxy.value) || ''
     }
     emit('refresh')
+    if (!silent) {
+      proxySaveOk.value = true
+      proxySaveMessage.value = t('Settings saved successfully!')
+    }
   } catch (e) {
     proxySaveOk.value = false
     proxySaveMessage.value = `${t('Failed to save settings')}: ${e}`
@@ -3224,10 +3348,10 @@ function showErrorDetails(download: Download) {
 async function pauseDownload(gid: string) {
   try {
     if (gid.startsWith('yt-dlp-direct-')) {
-      // Direct media downloads can't be paused mid-file; cancel the process and
-      // remove the row. The file (if partially downloaded) stays on disk.
-      await invoke('cancel_yt_download', { gid })
-      notify(t('Media download paused (cancelled)'), 'info')
+      // Pause keeps the row (status paused) so Resume can re-run it from
+      // the stored record via resume_yt_download.
+      await invoke('pause_yt_download', { gid })
+      notify(t('Media download paused'), 'info')
     } else {
       await invoke('pause_download', { gid })
     }
@@ -3401,18 +3525,66 @@ async function clearHistory() {
 
 function getDownloadFolder(): string {
   if (selectedDownload?.value?.path) {
-    return selectedDownload.value.path.split(/[\\/]/).slice(0, -1).join('\\') || 'â€"'
+    return selectedDownload.value.path.split(/[\\/]/).slice(0, -1).join('\\') || '—'
   }
   if (selectedDownloadDetails?.value?.files?.[0]?.path) {
-    return selectedDownloadDetails.value.files[0].path.split(/[\\/]/).slice(0, -1).join('\\') || 'â€"'
+    return selectedDownloadDetails.value.files[0].path.split(/[\\/]/).slice(0, -1).join('\\') || '—'
   }
-  return 'â€"'
+  return '—'
 }
 
-function copyToClipboard(text?: string | null): void {
-  if (!text || text === 'â€"') return
+// Hard cap for path-like strings in the details modal so a very long path
+// never stretches its box. Only the first few segments are shown; the full
+// value stays in the `title` tooltip.
+const PATH_PREVIEW_MAX = 18
+function shortenPath(value?: string | null, max = PATH_PREVIEW_MAX): string {
+  if (!value) return '—'
+  if (value.length <= max) return value
+  return value.slice(0, max) + '...'
+}
+
+// Single tooltip shared by every copy button: hover shows the action label
+// ("Copy path", "Copy URL", …), a click flips it to "Copied" for a moment and
+// it falls back to the hover label while the cursor is still on the button.
+const copyTip = ref<{ x: number; y: number; text: string } | null>(null)
+const copyHoverLabel = ref<string | null>(null)
+let copyTipTimer: number | null = null
+
+function anchorOf(ev: MouseEvent): { x: number; y: number } {
+  const el = ev.currentTarget as HTMLElement | null
+  if (el) {
+    const r = el.getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.top }
+  }
+  return { x: ev.clientX, y: ev.clientY }
+}
+
+function showCopyTip(label: string, ev: MouseEvent): void {
+  copyHoverLabel.value = label
+  if (copyTipTimer !== null) { window.clearTimeout(copyTipTimer); copyTipTimer = null }
+  copyTip.value = { ...anchorOf(ev), text: label }
+}
+
+function hideCopyTip(): void {
+  copyHoverLabel.value = null
+  if (copyTipTimer !== null) { window.clearTimeout(copyTipTimer); copyTipTimer = null }
+  copyTip.value = null
+}
+
+function copyToClipboard(text?: string | null, ev?: MouseEvent): void {
+  if (!text || text === '—') return
   navigator.clipboard.writeText(text).then(() => {
     notify(t('Copied to clipboard'), 'success')
+    if (!ev) return
+    // Flip the shared tooltip to "Copied", then restore the hover label if the
+    // cursor is still over the button (otherwise hide it).
+    copyTip.value = { ...anchorOf(ev), text: t('Copied') }
+    if (copyTipTimer !== null) window.clearTimeout(copyTipTimer)
+    copyTipTimer = window.setTimeout(() => {
+      copyTipTimer = null
+      const label = copyHoverLabel.value
+      copyTip.value = label ? { ...anchorOf(ev), text: label } : null
+    }, 1500)
   }).catch(() => {
     notify(t('Failed to copy'), 'error')
   })
@@ -3441,7 +3613,8 @@ function copyToClipboard(text?: string | null): void {
   color: var(--text);
 }
 .light .settings-hero {
-  background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.25), var(--bg-card));
+  background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.16), var(--bg-card));
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 0 0 1px var(--border);
 }
 
 .hero-left {
@@ -4947,7 +5120,7 @@ input[type="number"] {
 .details-scale-enter-active { animation: detailsSlideIn 0.25s ease; }
 .details-scale-leave-active { animation: detailsSlideIn 0.15s ease reverse; }
 
-.dm-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--border); gap: 16px; flex-shrink: 0; }
+.dm-header { display: flex; align-items: center; justify-content: space-between; padding: 13px 20px; border-bottom: 1px solid var(--border); gap: 16px; flex-shrink: 0; }
 .dm-header-main { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; }
 .dm-file-avatar { width: 44px; height: 44px; border-radius: 12px; background: rgba(var(--accent-rgb),0.08); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .dm-file-avatar i { font-size: 22px; color: var(--accent-strong); }
@@ -4978,6 +5151,26 @@ input[type="number"] {
 .dm-icon-btn.sm { width: 28px; height: 28px; }
 .dm-icon-btn.sm i { font-size: 15px; }
 
+/* "Copied" bubble anchored to the last-clicked copy button. */
+.dm-copy-tip {
+  position: fixed;
+  z-index: 3000;
+  transform: translate(-50%, -150%);
+  padding: 4px 10px;
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+}
+.dm-tip-fade-enter-active, .dm-tip-fade-leave-active { transition: opacity 0.15s ease, transform 0.15s ease; }
+.dm-tip-fade-enter-from, .dm-tip-fade-leave-to { opacity: 0; transform: translate(-50%, -120%); }
+
 .dm-tabs { display: flex; gap: 2px; padding: 0 16px; border-bottom: 1px solid var(--border); overflow-x: auto; flex-shrink: 0; }
 .dm-tab { background: none; border: none; border-bottom: 2.5px solid transparent; color: var(--text-dim); padding: 11px 14px; font-size: 12.5px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 7px; white-space: nowrap; transition: all 0.18s ease; }
 .dm-tab i { font-size: 17px; }
@@ -4992,8 +5185,8 @@ input[type="number"] {
 .dm-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); margin: 0 0 10px; display: flex; align-items: center; gap: 6px; opacity: 0.75; }
 .dm-section-title i { font-size: 15px; }
 
-.dm-table { width: 100%; border-collapse: collapse; border-radius: 10px; overflow: hidden; }
-.dm-table th, .dm-table td { padding: 10px 14px; text-align: left; font-size: 13px; border-bottom: 1px solid rgba(var(--accent-rgb),0.06); }
+.dm-table { width: 100%; border-collapse: collapse; border-radius: 10px; overflow: hidden; table-layout: fixed; }
+.dm-table th, .dm-table td { padding: 10px 14px; text-align: left; font-size: 13px; border-bottom: 1px solid rgba(var(--accent-rgb),0.06); overflow: hidden; }
 .dm-table th { font-weight: 600; color: var(--text-dim); width: 130px; white-space: nowrap; background: var(--hover-bg); }
 .dm-table td { color: var(--text); font-weight: 500; background: transparent; }
 .dm-table tr:last-child th, .dm-table tr:last-child td { border-bottom: none; }
@@ -5012,6 +5205,7 @@ input[type="number"] {
 .dm-progress-wrap { display: flex; align-items: center; gap: 10px; }
 .dm-progress-track { flex: 1; max-width: 160px; height: 6px; background: rgba(var(--accent-rgb),0.1); border-radius: 3px; overflow: hidden; }
 .dm-progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), rgba(var(--accent-rgb),0.7)); border-radius: 3px; transition: width 0.4s ease; }
+.dm-progress-fill.experimental { transition: none; }
 .dm-progress-pct { font-size: 13px; font-weight: 600; color: var(--text); min-width: 38px; }
 .dm-speed-cell { color: var(--accent-strong); font-weight: 600; }
 
@@ -5024,19 +5218,23 @@ input[type="number"] {
 .dm-source-tag.http { background: rgba(var(--accent-rgb),0.08); color: var(--accent-strong); }
 .dm-source-tag.direct { background: var(--hover-bg); color: var(--text-dim); }
 
-.dm-url-cell { display: flex; align-items: center; gap: 8px; }
-.dm-url-text { flex: 1; word-break: break-all; font-size: 12px; color: var(--text-dim); min-width: 0; }
-.dm-path-cell { word-break: break-all; font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 8px; }
+.dm-url-cell { display: flex; align-items: center; gap: 8px; min-width: 0; width: 100%; }
+.dm-url-cell .dm-icon-btn { flex-shrink: 0; }
+.dm-url-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; color: var(--text-dim); max-width: 260px; }
+.dm-path-cell { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 8px; min-width: 0; width: 100%; }
+.dm-path-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.dm-path-cell .dm-icon-btn { flex-shrink: 0; }
 
-.dm-file-table-wrapper { border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
-.dm-file-table { width: 100%; border-collapse: collapse; }
+.dm-file-table-wrapper { border-radius: 10px; overflow: auto; border: 1px solid var(--border); max-height: 240px; }
+.dm-file-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.dm-file-table th, .dm-file-table td { overflow: hidden; }
 .dm-file-table thead { background: var(--hover-bg); }
 .dm-file-table th { padding: 9px 12px; font-size: 11px; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; text-align: left; border-bottom: 1px solid var(--border); }
 .dm-file-table td { padding: 10px 12px; font-size: 12.5px; color: var(--text); border-bottom: 1px solid rgba(var(--accent-rgb),0.05); }
 .dm-file-table tr:last-child td { border-bottom: none; }
-.dm-file-name-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dm-file-name-cell { display: flex; align-items: center; gap: 8px; min-width: 0; width: 100%; }
 .dm-file-name-cell i { font-size: 18px; color: var(--accent-strong); flex-shrink: 0; }
-.dm-file-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.dm-file-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 .dm-file-progress-cell { min-width: 120px; }
 
 .dm-mini-progress { display: flex; align-items: center; gap: 8px; }
@@ -5044,8 +5242,8 @@ input[type="number"] {
 .dm-mini-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s; }
 .dm-mini-progress span { font-size: 11.5px; color: var(--text-dim); }
 
-.dm-empty-state { text-align: center; padding: 40px 20px; }
-.dm-empty-state i { font-size: 40px; color: var(--text-dim); opacity: 0.5; margin-bottom: 12px; }
+.dm-empty-state { text-align: center; padding: 20px 16px; border: 1px dashed var(--border); border-radius: 10px; background: var(--hover-bg); }
+.dm-empty-state i { font-size: 28px; color: var(--text-dim); opacity: 0.5; margin-bottom: 8px; }
 .dm-empty-state p { color: var(--text-dim); font-size: 14px; font-weight: 500; margin: 0 0 4px; }
 .dm-hint { font-size: 12px; color: var(--text-dim); opacity: 0.6; }
 
@@ -5060,7 +5258,7 @@ input[type="number"] {
 .dm-btn-secondary:hover { background: rgba(239,83,80,0.18); }
 .dm-btn-secondary i { font-size: 15px; }
 
-.dm-proxy-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.dm-proxy-actions { display: flex; align-items: center; gap: 10px; }
 .dm-proxy-save {
   display: inline-flex;
   align-items: center;
@@ -5086,6 +5284,15 @@ input[type="number"] {
 .dm-empty i { font-size: 36px; opacity: 0.4; display: block; margin-bottom: 8px; }
 .dm-empty p { margin: 0; font-size: 13px; }
 
+.dm-timeline-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; font-size: 11.5px; color: var(--text-dim); margin-bottom: 12px; }
+.dm-timeline-line i { font-size: 14px; opacity: 0.7; }
+
+/* Compact diagnostics block: same info, a fraction of the height. */
+.dm-debug { margin-bottom: 10px; }
+.dm-debug-title { margin-bottom: 4px; }
+.dm-debug-table tr { border-bottom: none; }
+.dm-debug-table th, .dm-debug-table td { padding: 3px 8px 3px 0; font-size: 11.5px; font-weight: 500; border-bottom: none; }
+.dm-debug-table th { width: 90px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em; background: transparent; }
 .dm-log-health { display: flex; align-items: center; gap: 6px; padding: 2px 0 8px; }
 .dm-log-circle { width: 22px; height: 22px; shape-rendering: auto; -webkit-font-smoothing: antialiased; }
 .dm-log-circle circle { shape-rendering: auto; }
@@ -5103,12 +5310,13 @@ input[type="number"] {
 .dm-log-badge { padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; text-transform: uppercase; white-space: nowrap; flex-shrink: 0; }
 .dm-log-badge.state_change { background: rgba(59,130,246,0.15); color: #60a5fa; }
 .dm-log-badge.error { background: rgba(239,68,68,0.15); color: #f87171; }
+.dm-log-badge.timeout { background: rgba(251,146,60,0.15); color: #fb923c; }
 .dm-log-badge.speed_sample { background: rgba(34,197,94,0.15); color: #4ade80; }
 .dm-log-badge.retry { background: rgba(234,179,8,0.15); color: #facc15; }
 .dm-log-badge.info { background: rgba(148,163,184,0.15); color: #94a3b8; }
 .dm-log-detail { color: var(--text-secondary); word-break: break-all; }
 
-.dm-footer { display: flex; justify-content: flex-end; padding: 12px 20px; border-top: 1px solid var(--border); flex-shrink: 0; }
+.dm-footer { display: flex; justify-content: flex-end; padding: 10px 20px; border-top: 1px solid var(--border); flex-shrink: 0; }
 .dm-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--accent); color: #0a0e1a; border: none; font-weight: 700; padding: 10px 22px; border-radius: 10px; cursor: pointer; font-size: 13px; transition: all 0.15s ease; box-shadow: 0 2px 8px rgba(var(--accent-rgb),0.2); }
 .dm-btn i { font-size: 16px; }
 .dm-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--accent-rgb),0.35); }

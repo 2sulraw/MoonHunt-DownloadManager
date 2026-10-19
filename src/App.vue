@@ -65,33 +65,73 @@ input, textarea, [contenteditable] {
   --sidebar-width: 72px;
 }
 .light {
-  --toolbar-bg: rgba(130, 100, 70, 0.10);
-  --toolbar-border: rgba(130, 100, 70, 0.08);
-  --toolbar-active: rgba(130, 100, 70, 0.12);
-  --toolbar-active-shadow: 0 1px 2px rgba(130, 100, 70, 0.08);
-  --bg-primary: #faf6f0;
-  --bg-surface: #f5f0ea;
-  --bg-card: #fefcf8;
-  --bg-card-alt: rgba(254, 252, 248, 0.95);
-  --text: #2c2417;
-  --text-muted: #5d4e3d;
-  --text-dim: #7a654b;
-  --status-active: #007bb2;
-  --status-complete: #358338;
-  --status-paused: #a86400;
-  --status-error: #e60e0a;
-  --status-waiting: #0274cf;
-  --status-cancelled: #737373;
-  --border: rgba(80, 50, 30, 0.06);
-  --border-strong: rgba(80, 50, 30, 0.10);
-  --hover-bg: rgba(80, 50, 30, 0.03);
-  --scrollbar-thumb: var(--accent);
-  --shadow-sm: 0 1px 2px rgba(60, 40, 20, 0.04);
-  --shadow-md: 0 4px 12px rgba(60, 40, 20, 0.06), 0 2px 4px rgba(60, 40, 20, 0.03);
-  --shadow-lg: 0 8px 24px rgba(60, 40, 20, 0.08), 0 4px 8px rgba(60, 40, 20, 0.04);
-  --shadow-card: 0 1px 3px rgba(60, 40, 20, 0.04), 0 0 0 1px rgba(60, 40, 20, 0.04);
+  /* Neutral, paper-white theme (Linear-style): cool gray canvas, pure white
+     cards, slate text, crisp hairline borders, soft ambient shadows. */
+  --toolbar-bg: rgba(20, 24, 34, 0.04);
+  --toolbar-border: rgba(20, 24, 34, 0.06);
+  --toolbar-active: #ffffff;
+  --toolbar-active-shadow: 0 1px 3px rgba(16, 24, 40, 0.10), 0 0 0 1px rgba(16, 24, 40, 0.05);
+  --bg-primary: #f4f5f7;
+  --bg-surface: #eef0f3;
+  --bg-card: #ffffff;
+  --bg-card-alt: rgba(255, 255, 255, 0.97);
+  --text: #171923;
+  --text-muted: #565d6d;
+  --text-dim: #838b9b;
+  --status-active: #0078b4;
+  --status-complete: #237a2a;
+  --status-paused: #a06000;
+  --status-error: #d32f2b;
+  --status-waiting: #1c72cc;
+  --status-cancelled: #6b7280;
+  --border: rgba(20, 24, 34, 0.09);
+  --border-strong: rgba(20, 24, 34, 0.14);
+  --hover-bg: rgba(20, 24, 34, 0.05);
+  --scrollbar-thumb: rgba(20, 24, 34, 0.25);
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow-md: 0 4px 14px rgba(16, 24, 40, 0.08), 0 1px 3px rgba(16, 24, 40, 0.04);
+  --shadow-lg: 0 10px 30px rgba(16, 24, 40, 0.12), 0 4px 10px rgba(16, 24, 40, 0.05);
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 0 0 1px rgba(20, 24, 34, 0.06);
   --sidebar-width: 72px;
 }
+
+/* === Light-mode fix-ups ===
+   Several shared components hardcode dark-theme decorations (white-alpha
+   fills/hover, dark input fills). On the near-white surfaces they render as
+   nothing (or worse, a dark box). These global rules carry `html` so their
+   specificity beats the scoped component copies of the same classes. */
+html.light .nd-input,
+html.light .batch-textarea {
+  background: #ffffff;
+}
+html.light .nd-input:hover,
+html.light .batch-textarea:hover {
+  border-color: var(--border-strong);
+  background: #ffffff;
+}
+html.light .nd-input:focus,
+html.light .batch-textarea:focus {
+  background: #ffffff;
+}
+html.light .nd-icon-btn:hover { background: rgba(20, 24, 34, 0.06); }
+html.light .nd-close:hover { background: rgba(211, 47, 47, 0.08); }
+html.light .nd-tab:hover:not(.active) { background: rgba(20, 24, 34, 0.05); }
+html.light .nd-tab-indicator {
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--border);
+}
+html.light .nd-btn-secondary { background: #ffffff; color: var(--text-muted); }
+html.light .nd-btn-secondary:hover:not(.disabled) {
+  background: rgba(var(--accent-rgb), 0.06);
+}
+/* Buttons with hardcoded dark hovers (add-download modal footer). */
+html.light .btn-cancel:hover,
+html.light .btn-primary:hover { background: var(--hover-bg); }
+/* Details-modal proxy inputs (dark charcoal was requested for dark mode). */
+html.light .pf-input,
+html.light .pf-input:hover,
+html.light .pf-input:focus { background: #ffffff; }
+html.light .pf-toggle-track { background: var(--hover-bg); }
+
 .linear-dark {
   --bg-primary: #08090a;
   --bg-surface: #0f1011;
