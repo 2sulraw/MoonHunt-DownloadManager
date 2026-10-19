@@ -12,6 +12,26 @@ use std::sync::Mutex;
 use tauri::command;
 use tauri::Manager;
 
+/// Lowercase stem (filename without extension) for fuzzy matching.
+fn file_stem_lower(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let stem = match base.rfind('.') {
+        Some(i) if i > 0 => &base[..i],
+        _ => base,
+    };
+    stem.to_lowercase()
+}
+
+/// Sanitization-insensitive key: lowercase alphanumeric characters only.
+/// Bridges yt-dlp's on-disk sanitizing vs the predicted filename
+/// (e.g. `My Video!.mp4` vs `My Video_.mp4`, emoji stripped, `__` collapsed).
+fn sanitized_key(name: &str) -> String {
+    file_stem_lower(name)
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
 fn find_existing_path(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
     if depth == 0 {
         return None;
@@ -27,6 +47,46 @@ fn find_existing_path(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
         }
         if path.is_dir() {
             if let Some(found) = find_existing_path(&path, name, depth - 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Fuzzy fallback: same stem (extension changed by remux, e.g. `.mkv` →
+/// `.mp4`) or sanitization-insensitive match (yt-dlp rewrote the title).
+/// Returns the first hit, preferring exact-stem matches.
+fn find_fuzzy_path(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
+    if depth == 0 {
+        return None;
+    }
+    let want_stem = file_stem_lower(name);
+    let want_key = sanitized_key(name);
+    let mut key_hit: Option<PathBuf> = None;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return None;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(n) = path.file_name().and_then(|n| n.to_str()) {
+                if file_stem_lower(n) == want_stem {
+                    return Some(path);
+                }
+                if key_hit.is_none() && !want_key.is_empty() && sanitized_key(n) == want_key {
+                    key_hit = Some(path.clone());
+                }
+            }
+        }
+    }
+    if key_hit.is_some() {
+        return key_hit;
+    }
+    for entry in std::fs::read_dir(dir).ok()?.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_fuzzy_path(&path, name, depth - 1) {
                 return Some(found);
             }
         }
@@ -57,11 +117,44 @@ fn resolve_download_file_state(
         return ("removed".to_string(), None);
     }
 
-    if let Some(found) = find_existing_path(download_dir, name, 4) {
-        ("moved".to_string(), Some(found.to_string_lossy().into_owned()))
-    } else {
-        ("removed".to_string(), None)
+    // Candidate names: the recorded filename plus the basename of the
+    // recorded path (they can disagree for yt-dlp rows).
+    let mut candidates: Vec<&str> = vec![name];
+    if let Some(path) = stored_path.filter(|s| !s.trim().is_empty()) {
+        let base = path.rsplit(['/', '\\']).next().unwrap_or(path).trim();
+        if !base.is_empty() && base != name {
+            candidates.push(base);
+        }
     }
+
+    // Candidate directories: the configured download dir plus the recorded
+    // path's parent dir (file may live where it was actually written).
+    let mut dirs: Vec<PathBuf> = vec![download_dir.to_path_buf()];
+    if let Some(path) = stored_path.filter(|s| !s.trim().is_empty()) {
+        let p = Path::new(path);
+        if let Some(parent) = p.parent() {
+            let parent_buf = parent.to_path_buf();
+            if parent_buf != *download_dir && parent_buf.is_dir() {
+                dirs.push(parent_buf);
+            }
+        }
+    }
+
+    for dir in &dirs {
+        for cand in &candidates {
+            if let Some(found) = find_existing_path(dir, cand, 4) {
+                return ("moved".to_string(), Some(found.to_string_lossy().into_owned()));
+            }
+        }
+    }
+    for dir in &dirs {
+        for cand in &candidates {
+            if let Some(found) = find_fuzzy_path(dir, cand, 4) {
+                return ("moved".to_string(), Some(found.to_string_lossy().into_owned()));
+            }
+        }
+    }
+    ("removed".to_string(), None)
 }
 
 /// Returns a per-download file-state badge for the Downloads UI.
@@ -307,9 +400,19 @@ pub fn init_db(app: &tauri::AppHandle) -> Result<(), String> {
     ).map_err(|e| format!("Failed to create download_events table: {}", e))?;
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_events_gid_ts ON download_events(gid, timestamp)", []);
 
+    // The old per-5s speed_sample recording is gone (replaced by drop
+    // detection); purge the noisy rows so the log only shows real events.
+    let _ = conn.execute("DELETE FROM download_events WHERE event_type = 'speed_sample'", []);
+
     // Migration: add size_bytes column for raw byte counts
     if !cols.iter().any(|c| c == "size_bytes") {
         let _ = conn.execute("ALTER TABLE downloads ADD COLUMN size_bytes INTEGER", []);
+    }
+
+    // Migration: persist failure reasons so the UI can show *why* a download
+    // errored (yt-dlp failures otherwise leave no trace in the row).
+    if !cols.iter().any(|c| c == "error_message") {
+        let _ = conn.execute("ALTER TABLE downloads ADD COLUMN error_message TEXT", []);
     }
 
     DB.set(Mutex::new(conn)).map_err(|_| "Database already initialized".to_string())?;
@@ -444,7 +547,7 @@ pub fn get_all_settings(app: tauri::AppHandle) -> Result<ProxySettings, String> 
 pub fn get_download_by_gid(_app: tauri::AppHandle, gid: String) -> Result<Option<serde_json::Value>, String> {
 // Look up a download record by its aria2 GID.
     let conn = db()?;
-    let mut stmt = conn.prepare("SELECT gid, filename, url, size, status, progress, added_at, path, connections, source, ytdlp_token, proxy FROM downloads WHERE gid = ?1")
+    let mut stmt = conn.prepare("SELECT gid, filename, url, size, status, progress, added_at, path, connections, source, ytdlp_token, proxy, error_message FROM downloads WHERE gid = ?1")
         .map_err(|e| format!("Query error: {}", e))?;
 
     let result = stmt.query_row([&gid], |row| {
@@ -461,6 +564,7 @@ pub fn get_download_by_gid(_app: tauri::AppHandle, gid: String) -> Result<Option
             "source": row.get::<_, Option<String>>(9)?,
             "ytdlp_token": row.get::<_, Option<String>>(10)?,
             "proxy": row.get::<_, Option<String>>(11)?,
+                "errorMessage": row.get::<_, Option<String>>(12)?,
         }))
     }).ok();
     
@@ -511,9 +615,28 @@ pub fn upsert_download(_app: tauri::AppHandle, record: DownloadRecord) -> Result
     Ok(())
 }
 
+/// Store a failure reason on a download row (capped). Upserts never touch
+/// this column, so progress writes can't wipe it and it only ever belongs to
+/// terminal error rows.
+pub fn set_download_error_message(gid: &str, message: &str) -> Result<(), String> {
+    const MAX: usize = 2000;
+    let trimmed = message.trim();
+    let capped = if trimmed.len() <= MAX {
+        trimmed.to_string()
+    } else {
+        format!("{}…", trimmed[..MAX].trim())
+    };
+    let conn = db()?;
+    conn.execute(
+        "UPDATE downloads SET error_message = ?1 WHERE gid = ?2",
+        rusqlite::params![capped, gid],
+    )
+    .map_err(|e| format!("Failed to store error message: {}", e))?;
+    Ok(())
+}
+
 #[command]
-pub fn remove_download_from_db(_app: tauri::AppHandle, gid: String) -> Result<(), String> {
-// Delete a download record from the database by GID.
+pub fn remove_download_from_db(_app: tauri::AppHandle, gid: String) -> Result<(), String> {// Delete a download record from the database by GID.
     let conn = db()?;
     conn.execute("DELETE FROM downloads WHERE gid = ?1", rusqlite::params![gid])
         .map_err(|e| format!("Delete error: {}", e))?;
@@ -524,7 +647,7 @@ pub fn remove_download_from_db(_app: tauri::AppHandle, gid: String) -> Result<()
 pub fn get_all_downloads_from_db(_app: tauri::AppHandle) -> Result<Vec<serde_json::Value>, String> {
 // Get all download records (history view).
     let conn = db()?;
-    let mut stmt = conn.prepare("SELECT gid, filename, url, size, status, progress, added_at, path, connections, source, ytdlp_token, proxy FROM downloads ORDER BY added_at DESC")
+    let mut stmt = conn.prepare("SELECT gid, filename, url, size, status, progress, added_at, path, connections, source, ytdlp_token, proxy, error_message FROM downloads ORDER BY added_at DESC")
         .map_err(|e| format!("Query error: {}", e))?;
 
     let mut results = Vec::new();
@@ -542,6 +665,7 @@ pub fn get_all_downloads_from_db(_app: tauri::AppHandle) -> Result<Vec<serde_jso
             "source": row.get::<_, Option<String>>(9)?,
             "ytdlp_token": row.get::<_, Option<String>>(10)?,
             "proxy": row.get::<_, Option<String>>(11)?,
+                "errorMessage": row.get::<_, Option<String>>(12)?,
         }))
     }).map_err(|e| format!("Query error: {}", e))?;
     

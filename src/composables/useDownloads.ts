@@ -44,7 +44,9 @@ function mapAria2Item(
 ): Download {
   const total = parseInt(item.totalLength || '0', 10)
   const completed = parseInt(item.completedLength || '0', 10)
-  const progress = total > 0 ? Math.round((completed / total) * 100) : 0
+  // Live totals can shrink mid-transfer (e.g. yt-dlp switching streams), which
+  // would push percent past 100 — clamp so bars never overflow.
+  const progress = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0
   const sizeDisplay =
     total > 0
       ? `${formatFileSize(completed)} / ${formatFileSize(total)}`
@@ -105,6 +107,11 @@ function mapAria2Item(
     source: sourceTag,
     ytdlp_token: extractedToken || undefined,
     speedHistory: arr,
+    phase: (item as { ytPhase?: string }).ytPhase,
+    engine: (item as { ytEngine?: string }).ytEngine,
+    peakTotal: item.ytPeakTotal ? parseInt(item.ytPeakTotal, 10) || undefined : undefined,
+    peakCompleted: item.ytPeakCompleted ? parseInt(item.ytPeakCompleted, 10) || undefined : undefined,
+    lastEventAt: Date.now(),
   }
 }
 
@@ -235,6 +242,11 @@ export function useDownloads() {
     return requestedConnectionsByUrl.get(normalizeUrlForMatch(url))
   }
 
+  // Round-robin cursor so huge completed histories are checked in small
+  // batches instead of one giant IPC + disk-stat storm near tab switches.
+  let fileStateCursor = 0
+  const FILE_STATE_BATCH_MAX = 50
+
   function scheduleFileStateCheck() {
     if (fileStateCheckInFlight) return
     if (document.hidden) return
@@ -243,18 +255,22 @@ export function useDownloads() {
     lastFileStateCheck = now
     fileStateCheckInFlight = true
 
-    const gids = downloads.value
-      .filter(
-        (d) =>
-          d.status === 'complete' &&
-          now - (lastFileStateCheckByGid.get(d.gid) || 0) >=
-            (d.fileState === 'removed' ? FILE_STATE_RECHECK_REMOVED_MS : FILE_STATE_CHECK_INTERVAL_MS),
-      )
-      .map((d) => d.gid)
-    if (!gids.length) {
+    const eligible = downloads.value.filter(
+      (d) =>
+        d.status === 'complete' &&
+        now - (lastFileStateCheckByGid.get(d.gid) || 0) >=
+          (d.fileState === 'removed' ? FILE_STATE_RECHECK_REMOVED_MS : FILE_STATE_CHECK_INTERVAL_MS),
+    )
+    if (!eligible.length) {
       fileStateCheckInFlight = false
       return
     }
+    // Rotate through the list 50 rows at a time.
+    const gids: string[] = []
+    for (let i = 0; i < Math.min(FILE_STATE_BATCH_MAX, eligible.length); i++) {
+      gids.push(eligible[(fileStateCursor + i) % eligible.length].gid)
+    }
+    fileStateCursor = (fileStateCursor + gids.length) % eligible.length
 
     invoke<Array<{ gid: string; fileState?: Download['fileState']; path?: string }>>(
       'check_download_file_states',
@@ -300,7 +316,6 @@ export function useDownloads() {
   }
 
   async function processAria2Items(items: Aria2DownloadItem[]) {
-    console.log(`[poll] receive ${items.length} live aria2 items:`, items.map((i) => `${i.gid}:${i.status}:${i.completedLength}/${i.totalLength}`))
     if (seedCount.value < 4) {
       seedFromLiveItems(items)
     } else {
@@ -464,7 +479,10 @@ export function useDownloads() {
       (d) =>
         isDirectYtDlpGid(d.gid) &&
         d.status === 'active' &&
-        !terminalDirectGids.has(d.gid),
+        !terminalDirectGids.has(d.gid) &&
+        // A cancelled direct row must not be resurrected from memory —
+        // the backend already killed the process and dropped the DB row.
+        !cancelledGids.has(d.gid),
     )
     const directActiveGids = new Set(directActive.map((d) => d.gid))
     const completedNotInLive = completedDownloads
@@ -474,7 +492,8 @@ export function useDownloads() {
           ...c,
           status: normalizeStatus(c.status) as Download['status'],
           fileState: c.fileState ?? prev?.fileState,
-          path: prev?.fileState ? prev.path || c.path : c.path,
+          path: c.path || prev?.path,
+          lastEventAt: prev?.lastEventAt,
         }
       })
       .filter(
@@ -500,8 +519,12 @@ export function useDownloads() {
         connections: row.connections ?? db?.connections ?? prev?.connections,
         added_at: db?.added_at ?? prev?.added_at ?? row.added_at,
         fileState: prev?.fileState ?? row.fileState,
-        path: prev?.fileState ? prev.path || row.path : row.path,
+        path: row.path || prev?.path,
         proxy: row.proxy ?? db?.proxy ?? prev?.proxy,
+        phase: row.phase ?? prev?.phase,
+        engine: row.engine ?? prev?.engine,
+        peakTotal: row.peakTotal ?? prev?.peakTotal,
+        peakCompleted: row.peakCompleted ?? prev?.peakCompleted,
         ...(db?.source && !row.source ? { source: db.source, ytdlp_token: db.ytdlp_token ?? row.ytdlp_token } : {}),
       }
     })
@@ -512,17 +535,28 @@ export function useDownloads() {
       ...missingActive,
       ...directActive.filter((d) => !liveGids.has(d.gid)),
     ]
-    console.log(
-      `[poll] final UI rows: ${downloads.value.map((d) => `${d.gid}:${d.status}:${d.size}`).join(' | ')}`,
-    )
-    const activeRows = downloads.value.filter((d) => d.status === 'active' || d.status === 'waiting')
-    if (activeRows.length) {
-      console.log(`[poll] ACTIVE rows in UI (not from aria2 live?): ${activeRows.map((d) => `${d.gid}:${d.filename}:${d.size}`).join(' | ')}`)
-    }
     scheduleFileStateCheck()
   }
 
+  // Trailing-edge debounce for refresh bursts (pause/resume/retry/cancel
+  // storms, schedule hits, tab switches). 400ms keeps the UI snappy while
+  // collapsing back-to-back IPC chains into one.
+  let refreshDebounceTimer: number | null = null
+  function requestRefresh() {
+    if (refreshDebounceTimer !== null) return
+    refreshDebounceTimer = window.setTimeout(() => {
+      refreshDebounceTimer = null
+      void refreshDownloads()
+    }, 400)
+  }
+
   async function refreshDownloads() {
+    // Hidden tab: skip the heavy aria2+DB round-trip; the backend poller
+    // keeps pushing `downloads-changed` events anyway.
+    if (document.hidden) {
+      pendingRefresh = true
+      return
+    }
     if (isRefreshing) {
       pendingRefresh = true
       return
@@ -568,7 +602,7 @@ export function useDownloads() {
             ...c,
             status: rawStatus as Download['status'],
             fileState: c.fileState ?? prev?.fileState,
-            path: prev?.fileState ? prev.path || c.path : c.path,
+            path: c.path || prev?.path,
           }
         })
         const snapshotGids = new Set(completedDownloads.map((c) => c.gid))
@@ -591,9 +625,17 @@ export function useDownloads() {
   }
 
   async function cancelDownload(gid: string) {
-    // 1. Remove from aria2 (stops transfer, purges from aria2 lists)
-    //    This internally calls mark_cancelled so the poll filters it out
-    await invoke('remove_download', { gid }).catch(() => {})
+    // Direct yt-dlp downloads aren't aria2 tasks — kill the child process.
+    // (Previously this only removed the aria2 task (a no-op for direct
+    // gids), so the process kept running and its progress ticks resurrected
+    // the row — "cancel doesn't work".)
+    if (isDirectYtDlpGid(gid)) {
+      await invoke('cancel_yt_download', { gid }).catch(() => {})
+    } else {
+      // Remove from aria2 (stops transfer, purges from aria2 lists)
+      // This internally calls mark_cancelled so the poll filters it out
+      await invoke('remove_download', { gid }).catch(() => {})
+    }
     // 2. Save to DB as cancelled (persists across restarts)
     const existing = downloads.value.find(d => d.gid === gid)
     if (existing) {
@@ -626,7 +668,7 @@ export function useDownloads() {
   }
 
   function temporaryFastRefresh() {
-    refreshDownloads()
+    requestRefresh()
   }
 
   function startPolling() {
@@ -655,14 +697,14 @@ export function useDownloads() {
     // as soon as the backend reports a terminal state.
     listen<{ gid: string; filename: string }>('yt-dl-complete', () => {
       cachedDbDownloads = null
-      refreshDownloads()
+      requestRefresh()
     }).then((unlisten) => {
       unlistenFns.push(unlisten)
     })
 
     listen<{ gid: string; error: string }>('yt-dl-error', () => {
       cachedDbDownloads = null
-      refreshDownloads()
+      requestRefresh()
     }).then((unlisten) => {
       unlistenFns.push(unlisten)
     })

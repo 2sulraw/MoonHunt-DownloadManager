@@ -207,11 +207,11 @@ const progressStyle = computed(() => {
     else shadow = '0 0 6px rgba(var(--accent-rgb),0.6)'
   }
   return {
-    width: d.progress + '%',
+    width: Math.min(100, Math.max(0, d.progress)) + '%',
     height: '100%',
     background: d.status === 'error' ? '#ef5350' : (d.status === 'paused' ? '#d68e26' : (d.status === 'cancelled' ? '#9e9e9e' : (d.progress === 100 ? '#81c784' : 'var(--accent)'))),
         borderRadius: '4px',
-    transition: 'width 0.4s ease',
+    transition: d.engine === 'experimental' ? 'none' : 'width 0.4s ease',
     boxShadow: shadow,
   }
 })

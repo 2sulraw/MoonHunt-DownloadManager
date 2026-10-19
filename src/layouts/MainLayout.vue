@@ -27,7 +27,7 @@
       </div>
     </div>
 
-    <DownloadConfirmDialog ref="downloadDialog" :downloads="downloads" />
+    <DownloadConfirmDialog ref="downloadDialog" :downloads="downloads" @open-addon="handleOpenAddon" />
     <DownloadLimitAlert ref="downloadLimitAlert" />
 
     <GlobalContextMenu
@@ -109,7 +109,7 @@ const downloadLimitAlert = ref<InstanceType<typeof DownloadLimitAlert> | null>(n
 const clipboardToastRef = ref<InstanceType<typeof ClipboardToast> | null>(null)
 
 const pageTitle = computed(() => {
-  const titles: Record<string, string> = { '/': t('Dashboard'), '/downloads': t('Downloads'), '/media': t('Media'), '/settings': t('Settings') }
+  const titles: Record<string, string> = { '/': t('Dashboard'), '/downloads': t('Downloads'), '/media': t('Media'), '/addon': t('Addon'), '/settings': t('Settings') }
   return titles[route.path] || 'MoonHunt'
 })
 
@@ -194,7 +194,8 @@ async function handleGlobalContextAction(action: string, download: Download) {
   switch (action) {
     case 'pause':
       if (isYtDirect) {
-        invoke('cancel_yt_download', { gid: download.gid }).then(() => refreshDownloads()).catch(e => console.error(e))
+        // Pause keeps the row so resume_yt_download can re-run it later.
+        invoke('pause_yt_download', { gid: download.gid }).then(() => refreshDownloads()).catch(e => console.error(e))
       } else {
         invoke('pause_download', { gid: download.gid }).then(() => refreshDownloads()).catch(e => console.error(e))
       }
@@ -322,6 +323,14 @@ function handleBatchDownload() {
     })
   } else {
     window.dispatchEvent(new CustomEvent('moonhunt:batch-download'))
+  }
+}
+
+function handleOpenAddon(payload: { addonId: string; url: string }) {
+  if (route.path !== '/addon') {
+    void router.push({ path: '/addon', query: { addon: payload.addonId, url: payload.url } })
+  } else {
+    window.dispatchEvent(new CustomEvent('moonhunt:open-addon', { detail: payload }))
   }
 }
 

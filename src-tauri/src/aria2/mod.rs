@@ -509,7 +509,7 @@ pub async fn get_download_details(gid: String) -> Result<Value, String> {
     // no longer remembers after restart.
     let conn = db()?;
     let mut stmt = conn
-        .prepare("SELECT filename, url, size, status, path, connections, size_bytes FROM downloads WHERE gid = ?1")
+        .prepare("SELECT filename, url, size, status, path, connections, size_bytes, error_message FROM downloads WHERE gid = ?1")
         .map_err(|e| format!("DB query error: {}", e))?;
     stmt.query_row([&gid], |row| {
         let _filename: String = row.get(0)?;
@@ -519,6 +519,7 @@ pub async fn get_download_details(gid: String) -> Result<Value, String> {
         let path: Option<String> = row.get(4)?;
         let connections: Option<i32> = row.get(5)?;
         let size_bytes: Option<u64> = row.get(6)?;
+        let error_message: Option<String> = row.get(7)?;
         let bytes = size_bytes.unwrap_or(0);
         let bytes_str = if bytes > 0 { bytes.to_string() } else { String::new() };
         Ok(serde_json::json!({
@@ -526,6 +527,7 @@ pub async fn get_download_details(gid: String) -> Result<Value, String> {
             "totalLength": if bytes > 0 { bytes.to_string() } else { size },
             "completedLength": if bytes > 0 && status == "complete" { bytes.to_string() } else { String::new() },
             "connections": connections.map(|c| c.to_string()).unwrap_or_default(),
+            "errorMessage": error_message.unwrap_or_default(),
             "files": [{
                 "path": path.unwrap_or_default(),
                 "length": bytes_str.clone(),
@@ -1359,7 +1361,7 @@ pub async fn retry_download(app: tauri::AppHandle, gid: String) -> Result<String
     println!("[~] Re-adding for retry. source={}, url={}", source, url);
 
     if source == "yt-dlp" {
-        crate::ytdlp::add_yt_download(app, url, "best".to_string(), None, dir_opt, None, None).await
+        crate::ytdlp::add_yt_download(app, url, "best".to_string(), None, dir_opt, None, None, None, None).await
     } else {
         add_download(app, url, filename_opt, connections_opt, dir_opt, None, None, Some(can_resume)).await
     }

@@ -56,7 +56,7 @@
     </div>
 
     <!-- Progress bar at bottom -->
-    <div class="dlc-progress-track"><div class="dlc-progress-fill" :style="{ width: download.progress + '%', background: download.status === 'error' ? '#ef5350' : (download.status === 'paused' ? '#d68e26' : (download.status === 'cancelled' ? '#9e9e9e' : (download.progress === 100 ? '#81c784' : 'var(--accent)'))) }"></div></div>
+    <div class="dlc-progress-track"><div class="dlc-progress-fill" :class="{ experimental: download.engine === 'experimental' }" :style="{ width: download.progress + '%', background: download.status === 'error' ? '#ef5350' : (download.status === 'paused' ? '#d68e26' : (download.status === 'cancelled' ? '#9e9e9e' : (download.progress === 100 ? '#81c784' : 'var(--accent)'))) }"></div></div>
 
     <!-- Group dropdown -->
     <transition name="group-dropdown-fade">
@@ -192,6 +192,7 @@ function handleDoubleClick(e: MouseEvent) {
 .dlc-btn-del:hover { color: var(--status-error); }
 .dlc-progress-track { position: absolute; bottom: 0; left: 8px; right: 8px; height: 2px; background: var(--hover-bg); border-radius: 1px; overflow: hidden; }
 .dlc-progress-fill { height: 100%; border-radius: 1px; transition: width 0.3s ease; }
+.dlc-progress-fill.experimental { transition: none; }
 .group-card-btn-wrapper { position: relative; }
 .group-btn:hover { color: var(--accent-strong); }
 .group-dropdown-menu { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-lg); padding: 6px 0; min-width: 160px; }

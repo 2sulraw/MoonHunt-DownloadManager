@@ -42,6 +42,15 @@ export interface Download {
   fileState?: DownloadFileState
   /** Per-download proxy override (e.g. `http://user:pass@host:port`); empty = inherit global. */
   proxy?: string
+  /** Direct yt-dlp phase: downloading | merging (experimental engine). */
+  phase?: string
+  /** Progress engine that produced this row: legacy | experimental. */
+  engine?: string
+  /** Fixed denominator + monotonic bytes (experimental). */
+  peakTotal?: number
+  peakCompleted?: number
+  /** Local-only: ms timestamp of last live event for this gid. */
+  lastEventAt?: number
 }
 
 /** Normalize aria2 / DB status strings into a small UI enum. */
@@ -60,6 +69,6 @@ export interface DownloadEvent {
   id: number
   gid: string
   timestamp: number
-  eventType: 'state_change' | 'error' | 'speed_sample' | 'retry' | 'info'
+  eventType: 'state_change' | 'error' | 'speed_sample' | 'retry' | 'info' | 'timeout'
   detail: string | null
 }

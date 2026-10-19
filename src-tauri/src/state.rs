@@ -77,6 +77,13 @@ pub struct ProxySettings {
     /// Titlebar search: show matching-downloads preview dropdown. Default on.
     #[serde(default = "default_true")]
     pub search_preview_enabled: bool,
+    /// Progress engine for live updates: "legacy" (default) or "experimental"
+    /// (byte-counter with fixed denominator + faster emits).
+    #[serde(default)]
+    pub progress_engine: Option<String>,
+    /// Show raw diagnostics section in the download Details modal. Default off.
+    #[serde(default)]
+    pub show_download_diagnostics: bool,
 }
 
 fn default_true() -> bool { true }
@@ -131,6 +138,8 @@ impl Default for ProxySettings {
             torrent_upload_limit: None,
             open_in_browser_protocol_enabled: false,
             search_preview_enabled: true,
+            progress_engine: None,
+            show_download_diagnostics: false,
         }
     }
 }
@@ -258,6 +267,10 @@ pub struct AppState {
     pub active_yt_scan: Arc<Mutex<std::collections::HashMap<String, std::process::Child>>>,
     pub cancelled_yt_scans: Arc<Mutex<std::collections::HashSet<String>>>,
     pub active_yt_downloads: Arc<Mutex<std::collections::HashMap<String, u32>>>,
+    /// GIDs the user paused via `pause_yt_download`. The download thread
+    /// persists a `paused` row (instead of `error`) and exits; resume
+    /// re-runs from the stored record and clears the entry.
+    pub paused_yt_downloads: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 pub static RPC_PORT: OnceLock<AtomicU32> = OnceLock::new();

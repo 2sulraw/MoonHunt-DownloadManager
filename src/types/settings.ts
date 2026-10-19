@@ -52,6 +52,11 @@ export interface Aria2DownloadItem {
   errorCode?: string
   errorMessage?: string
   requestHeaders?: unknown
+  /** Experimental engine extras (direct yt-dlp only). */
+  ytPhase?: string
+  ytEngine?: string
+  ytPeakTotal?: string
+  ytPeakCompleted?: string
 }
 
 export interface Aria2File {

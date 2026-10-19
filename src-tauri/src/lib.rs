@@ -4,6 +4,7 @@
 //! Handles aria2 RPC, yt-dlp, browser extension,
 //! download scheduling, and SQLite persistence.
 
+mod addon;
 mod aria2;
 mod clipboard;
 mod db;
@@ -95,6 +96,7 @@ pub fn run() {
             active_yt_scan: Arc::new(Mutex::new(std::collections::HashMap::new())),
             cancelled_yt_scans: Arc::new(Mutex::new(std::collections::HashSet::new())),
             active_yt_downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            paused_yt_downloads: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -221,6 +223,10 @@ pub fn run() {
                 // not the frontend — is the durable source for "was this completed".
                 let mut persisted_terminal: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let mut last_status: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                // Connection-drop detection: per gid, the last observed byte
+                // count, when that count froze, and whether the drop was
+                // already reported. (bytes, frozen_at, reported)
+                let mut stall_state: std::collections::HashMap<String, (u64, Option<std::time::Instant>, bool)> = std::collections::HashMap::new();
                 let mut poll_tick: u32 = 0;
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(1));
@@ -419,12 +425,25 @@ pub fn run() {
                             .iter()
                             .filter_map(|t| t.get("gid").and_then(|g| g.as_str()).map(String::from))
                             .collect();
+                        // Direct yt-dlp downloads never appear in aria2's live
+                        // set — but while their child process is registered as
+                        // running they are NOT orphans. Without this, a just
+                        // started direct download was flipped to `error` here
+                        // and only recovered on the next progress tick
+                        // (stuck → error → started flicker).
+                        let live_yt_gids: std::collections::HashSet<String> = app_handle
+                            .state::<AppState>()
+                            .active_yt_downloads
+                            .lock()
+                            .map(|g| g.keys().cloned().collect())
+                            .unwrap_or_default();
                         let mut orphan_persisted: Vec<String> = Vec::new();
                         let db_rows = crate::db::get_all_downloads_from_db(app_handle.clone()).unwrap_or_default();
                         for row in db_rows {
                             let Some(gid) = row.get("gid").and_then(|v| v.as_str()) else { continue };
                             if cancelled_gids.contains(&gid.to_string())
                                 || live_gid_set.contains(gid)
+                                || live_yt_gids.contains(gid)
                                 || orphan_persisted.iter().any(|g| g == gid)
                             {
                                 continue;
@@ -615,22 +634,69 @@ pub fn run() {
                         let _ = app_handle.emit("live-stats-changed", &payload);
                     }
 
-                    // Record speed samples every 5 seconds for active downloads.
-                    if include_stopped {
+                    // Connection-drop detection: an active download whose byte
+                    // count stops advancing for STALL_TIMEOUT_SECS is a stalled
+                    // (timed out) connection. Reported once per stall, with a
+                    // recovery line when bytes flow again. Replaces the old
+                    // speed-sample spam — this is what actually matters.
+                    {
+                        const STALL_TIMEOUT_SECS: u64 = 20;
+                        let mut live_gids: std::collections::HashSet<String> = std::collections::HashSet::new();
                         for item in &result {
                             let st = item.get("status").and_then(|s| s.as_str()).unwrap_or("");
                             if st != "active" { continue; }
                             let Some(gid) = item.get("gid").and_then(|v| v.as_str()) else { continue };
-                            let speed = aria2_u64(item.get("downloadSpeed"));
-                            let connections = item.get("connections").and_then(|v| {
-                                v.as_str().and_then(|s| s.parse::<u32>().ok()).or_else(|| v.as_u64().map(|n| n as u32))
-                            }).unwrap_or(0);
-                            let total = aria2_u64(item.get("totalLength"));
+                            if cancelled_gids.contains(&gid.to_string()) { continue; }
+                            live_gids.insert(gid.to_string());
                             let completed = aria2_u64(item.get("completedLength"));
-                            let speed_str = crate::util::format_bytes(speed);
-                            let detail = format!("speed={}/s connections={} progress={}", speed_str, connections, if total > 0 { format!("{:.1}%", completed as f64 / total as f64 * 100.0) } else { "0%".into() });
-                            crate::db::insert_download_event(gid, "speed_sample", &detail);
+                            let total = aria2_u64(item.get("totalLength"));
+                            let entry = stall_state.entry(gid.to_string()).or_insert((completed, None, false));
+                            if completed != entry.0 {
+                                // Bytes moved again: clear the freeze and note
+                                // a recovery when the stall was reported.
+                                let was_reported = entry.2;
+                                let frozen_at = entry.1;
+                                *entry = (completed, None, false);
+                                if was_reported {
+                                    let secs = frozen_at
+                                        .map(|t| t.elapsed().as_secs())
+                                        .unwrap_or(0);
+                                    crate::db::insert_download_event(
+                                        gid,
+                                        "retry",
+                                        &format!("connection restored after {}s stall", secs),
+                                    );
+                                }
+                            } else if entry.2 {
+                                // Still frozen; nothing to do.
+                            } else {
+                                if entry.1.is_none() {
+                                    entry.1 = Some(std::time::Instant::now());
+                                }
+                                if let Some(frozen_at) = entry.1 {
+                                    let elapsed = frozen_at.elapsed().as_secs();
+                                    if elapsed >= STALL_TIMEOUT_SECS {
+                                        entry.2 = true;
+                                        let speed = aria2_u64(item.get("downloadSpeed"));
+                                        let connections = item.get("connections").and_then(|v| {
+                                            v.as_str().and_then(|s| s.parse::<u32>().ok())
+                                                .or_else(|| v.as_u64().map(|n| n as u32))
+                                        }).unwrap_or(0);
+                                        let detail = format!(
+                                            "connection drop: no progress for {}s at {}/{} (speed {}/s, connections {})",
+                                            elapsed,
+                                            crate::util::format_bytes(completed),
+                                            crate::util::format_bytes(total),
+                                            crate::util::format_bytes(speed),
+                                            connections,
+                                        );
+                                        crate::db::insert_download_event(gid, "timeout", &detail);
+                                    }
+                                }
+                            }
                         }
+                        // Drop tracking state for downloads that are no longer running.
+                        stall_state.retain(|gid, _| live_gids.contains(gid));
                     }
 
                     // Skipping the stopped snapshot also means an empty result
@@ -764,8 +830,10 @@ pub fn run() {
             ytdlp::scan_yt_formats,
             ytdlp::cancel_yt_scan,
             ytdlp::cancel_yt_download,
+            ytdlp::pause_yt_download,
             ytdlp::resume_yt_download,
             ytdlp::add_yt_download,
+            ytdlp::get_yt_download_health,
             ytdlp::check_yt_dlp_exists,
             ytdlp::get_yt_dlp_path,
             ytdlp::open_app_bin_folder,
@@ -848,7 +916,20 @@ pub fn run() {
             logfile::get_log_file_path,
             logfile::open_log_folder,
             hide_to_tray,
-            quit_app
+            quit_app,
+            addon::install_addon_from_path,
+            addon::open_addons_folder,
+            addon::install_addon_from_url,
+            addon::install_addon_from_dir,
+            addon::export_addon_template,
+            addon::export_addon_package,
+            addon::addon_read_entry,
+            addon::list_addons,
+            addon::addon_entry_path,
+            addon::uninstall_addon,
+            addon::set_addon_enabled,
+            addon::addon_fetch_url,
+            addon::addon_yt_search
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
