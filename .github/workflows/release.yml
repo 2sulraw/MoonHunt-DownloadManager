@@ -1,0 +1,80 @@
+name: Release
+
+# Builds the Linux bundles for a version tag. The Windows NSIS/MSI installers
+# are built locally (v0.0.5 style) and uploaded to the same release manually.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            patchelf \
+            rpm
+
+      - name: Install frontend dependencies
+        run: npm ci --prefer-offline || npm install
+
+      - name: Build Tauri app
+        run: npm run tauri -- build --ci
+
+      - name: Collect Linux bundles
+        run: |
+          mkdir -p artifacts
+          cp src-tauri/target/release/bundle/appimage/*.AppImage artifacts/ || true
+          cp src-tauri/target/release/bundle/deb/*.deb artifacts/ || true
+          cp src-tauri/target/release/bundle/rpm/*.rpm artifacts/ || true
+          ls -la artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundles
+          path: artifacts/*
+
+  publish-linux:
+    runs-on: ubuntu-22.04
+    needs: build-linux
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-bundles
+          path: artifacts
+
+      - name: Attach bundles to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" artifacts/* \
+              --title "MoonHunt $GITHUB_REF_NAME" \
+              --notes "Linux bundles for $GITHUB_REF_NAME."
+          fi

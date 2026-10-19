@@ -1,6 +1,6 @@
 # Maintainer: MoonHunt Contributors
 pkgname=moonhunt
-pkgver=0.0.5
+pkgver=0.0.6
 pkgrel=1
 pkgdesc="A download manager powered by aria2 and yt-dlp"
 arch=('x86_64')
