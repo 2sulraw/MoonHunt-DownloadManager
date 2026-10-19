@@ -4,6 +4,7 @@ import HomePage from '../views/HomePage.vue'
 import DownloadsPage from '../views/DownloadsPage.vue'
 import SettingsPage from '../views/SettingsPage.vue'
 import MediaPage from '../views/Media.vue'
+import AddonPage from '../views/AddonPage.vue'
 
 const routes = [
   {
@@ -13,6 +14,7 @@ const routes = [
       { path: '', name: 'home', component: HomePage },
       { path: 'downloads', name: 'downloads', component: DownloadsPage },
       { path: 'media', name: 'media', component: MediaPage },
+      { path: 'addon', name: 'addon', component: AddonPage },
       { path: 'settings', name: 'settings', component: SettingsPage },
     ]
   }

@@ -156,6 +156,7 @@ const menuItems = computed(() => [
   { key: 'home', label: t('Home'), icon: 'home', path: '/' },
   { key: 'downloads', label: t('Downloads'), icon: 'cloud_download', path: '/downloads' },
   { key: 'media', label: t('Media'), icon: 'movie', path: '/media' },
+  { key: 'addon', label: t('Addon'), icon: 'extension', path: '/addon' },
   { key: 'settings', label: t('Settings'), icon: 'settings', path: '/settings' },
   { key: 'about', label: t('About'), icon: 'info', action: 'about' as const },
 ])

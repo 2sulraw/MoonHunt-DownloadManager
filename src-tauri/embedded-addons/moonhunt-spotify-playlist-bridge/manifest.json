@@ -1,0 +1,12 @@
+{
+  "id": "moonhunt-spotify-playlist-bridge",
+  "name": "moonhunt-Spotify-playlist-bridge",
+  "version": "0.0.3",
+  "author": "MoonHunt",
+  "entry": "addon.js",
+  "icon": "library_music",
+  "description": "Resolve Spotify links to YouTube matches and download tracks.",
+  "url_patterns": ["open.spotify.com", "spotify.com"],
+  "permissions": ["media.search", "media.download", "net.fetch"],
+  "min_app_version": "0.0.5"
+}

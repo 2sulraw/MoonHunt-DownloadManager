@@ -1,0 +1,12 @@
+{
+  "id": "my-addon",
+  "name": "My Addon",
+  "version": "0.1.0",
+  "author": "Your name",
+  "entry": "addon.js",
+  "icon": "extension",
+  "description": "What your addon does, in one line.",
+  "url_patterns": [],
+  "permissions": ["media.search", "media.download", "net.fetch"],
+  "min_app_version": "0.0.5"
+}

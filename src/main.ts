@@ -7,6 +7,7 @@ import router from './router'
 import { installConsoleBridge, setDebugLogBridge } from './composables/useDebugLog'
 import '@fontsource/nunito'
 import '@material-design-icons/font/filled.css'
+import './assets/nd-shared.css'
 
 installConsoleBridge()
 

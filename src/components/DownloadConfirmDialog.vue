@@ -37,6 +37,14 @@
                   <i class="material-icons">close</i>
                 </button>
               </div>
+              <div v-if="matchedAddon" class="nd-addon-hint">
+                <i class="material-icons">extension</i>
+                <span>{{ t('Handled by') }} {{ matchedAddon.name }}</span>
+                <button class="nd-addon-open" @click="openInAddon">
+                  {{ t('Open in Addon') }}
+                  <i class="material-icons">arrow_forward</i>
+                </button>
+              </div>
             </div>
 
             <Transition name="nd-slide">
@@ -152,6 +160,7 @@ import { loadDownloadCategories } from '../composables/useDownloadCategories'
 import { resolveCategoryDir, type DownloadCategoryMode } from '../utils/downloadCategories'
 import { emptyProxyForm, serializeProxy, type ProxyFormValue } from '../utils/proxy'
 import { useI18n } from '../i18n'
+import { useAddons } from '../composables/useAddons'
 import type { ScheduleResult } from './ScheduleModal.vue'
 import type { Download } from '../types/download'
 
@@ -159,8 +168,26 @@ const props = defineProps<{
   downloads?: Download[]
 }>()
 
+const emit = defineEmits<{
+  'open-addon': [payload: { addonId: string; url: string }]
+}>()
+
 const { overlayPress, overlayCancel, overlayRelease } = useOverlayClose()
 const { t } = useI18n()
+const { matchUrl, refresh: refreshAddons } = useAddons()
+
+const matchedAddon = computed(() => {
+  if (!urlValue.value.trim()) return null
+  return matchUrl(urlValue.value.trim())
+})
+
+function openInAddon() {
+  const addon = matchedAddon.value
+  const url = urlValue.value.trim()
+  if (!addon || !url) return
+  emit('open-addon', { addonId: addon.id, url })
+  close()
+}
 
 const isOpen = ref(false)
 const urlValue = ref('')
@@ -270,6 +297,7 @@ async function openDialog(url: string, suggestedFilename: string, suggestedPath 
 
   void loadDownloadCategories()
   void loadDefaultDir()
+  void refreshAddons()
 
   const promise = new Promise<DownloadDialogResult>((resolve) => {
     resolveDownload = resolve
@@ -513,6 +541,38 @@ defineExpose({ openDialog, isDialogOpen: () => isOpen.value })
 }
 .nd-input-action i { font-size: 18px; }
 .nd-input-action:hover { background: rgba(var(--accent-rgb), 0.1); color: var(--accent-strong); }
+
+.nd-addon-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(var(--accent-rgb), 0.08);
+  border: 1px solid rgba(var(--accent-rgb), 0.16);
+  font-size: 12px;
+  color: var(--text);
+}
+.nd-addon-hint > i { font-size: 16px; color: var(--accent-strong); }
+.nd-addon-hint span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nd-addon-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--accent);
+  color: #0a0e1a;
+  border: none;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  flex-shrink: 0;
+}
+.nd-addon-open i { font-size: 14px; }
+.nd-addon-open:hover { opacity: 0.9; }
 
 .nd-filename-row { position: relative; }
 .nd-filename-wrap { width: 100%; }
