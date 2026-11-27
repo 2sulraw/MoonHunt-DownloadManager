@@ -1,0 +1,71 @@
+# Maintainer: MoonHunt Contributors
+pkgname=moonhunt
+pkgver=0.0.7
+pkgrel=1
+pkgdesc="MoonHunt download manager (native Rust/egui)"
+arch=('x86_64')
+url="https://github.com/2sulraw/MoonHunt-DownloadManager"
+license=('GPL-3.0-only')
+depends=(
+  'aria2'
+  'openssl'
+  'xz'
+  'gcc-libs'
+  'glibc'
+  'libx11'
+  'libxkbcommon'
+  'libxkbcommon-x11'
+  'libxcursor'
+  'libxrandr'
+  'libxi'
+  'libxinerama'
+  'mesa'
+  'wayland'
+  'fontconfig'
+  'hicolor-icon-theme'
+)
+makedepends=('rust' 'pkgconf' 'base-devel')
+optdepends=(
+  'yt-dlp: media / YouTube downloads'
+  'ffmpeg: merge separate video+audio streams'
+)
+install=moonhunt.install
+# rusqlite's bundled SQLite is compiled with makepkg CFLAGS; default `lto`
+# injects -flto=auto, which rust-lld cannot link. Disable LTO.
+options=('!lto')
+source=("$pkgname-$pkgver-source.tar.gz::https://github.com/2sulraw/MoonHunt-DownloadManager/releases/download/v$pkgver/moonhunt-$pkgver-source.tar.gz")
+sha256sums=('30720868df2ade2d029202a05db9bf13f828600faa80213b543c7684c7226282')
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  export CARGO_HOME="$srcdir/cargo-home"
+  cargo build --release -p moonhunt
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+
+  install -Dm755 "target/release/moonhunt" "$pkgdir/usr/bin/moonhunt"
+  install -Dm755 "$(which aria2c)" "$pkgdir/usr/lib/moonhunt/aria2c"
+
+  install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/moonhunt.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=MoonHunt
+GenericName=Download Manager
+Comment=MoonHunt download manager
+Exec=/usr/bin/moonhunt %U
+Icon=moonhunt
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+StartupWMClass=moonhunt
+MimeType=x-scheme-handler/moonhunt;
+EOF
+
+  install -Dm644 "icons/32x32.png" "$pkgdir/usr/share/icons/hicolor/32x32/apps/moonhunt.png"
+  install -Dm644 "icons/128x128.png" "$pkgdir/usr/share/icons/hicolor/128x128/apps/moonhunt.png"
+  install -Dm644 "icons/128x128@2x.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/moonhunt.png"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

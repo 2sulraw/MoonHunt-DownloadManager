@@ -1,0 +1,27 @@
+[package]
+name = "moonhunt"
+version.workspace = true
+edition.workspace = true
+description = "MoonHunt download manager — egui frontend"
+
+[dependencies]
+moonhunt-core = { path = "../crates/core" }
+eframe = { version = "0.37", default-features = false, features = [
+    "default_fonts",
+    "clipboard",
+    "glow",
+    "wayland",
+    "x11",
+    # egui_mcp / egui_inspection: enables the inspection protocol
+    # (launch with EGUI_INSPECTION=1 to serve on 127.0.0.1:5719).
+    "inspection",
+] }
+egui = "0.37"
+# Download-details modal (`.details-modal-new`) — flexbox column layout for the
+# header / tab-nav / body / footer shell, ported 1:1 from the old CSS.
+egui_taffy = "0.16"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png"] }

@@ -1,0 +1,3117 @@
+﻿//! yt-dlp integration: format scan, download pipeline, install/uninstall.
+
+use crate::aria2::Aria2Client;
+use crate::state::{lock, DownloadRecord};
+use crate::util::{cmd_no_window, format_bytes};
+use serde_json::{json, Map, Value};
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const YT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const YT_DLP_INSTALL_CANCEL_KEY: &str = "yt-dlp";
+const EJS_INSTALL_CANCEL_KEY: &str = "ejs";
+/// Marker prefix for the `--print after_move:` filepath report (see args setup
+/// in `add_yt_download`). Lets the completed record use yt-dlp's real filename.
+const FILEPATH_MARKER: &str = "MH_FILEPATH:";
+
+/// Parse the first JSON value out of yt-dlp's stdout.
+///
+/// yt-dlp can print several JSON objects (one per media entry, e.g. an X post
+/// with multiple videos). Slicing from the first `{` to the last `}` would span
+/// all of them and make serde fail with "trailing characters at line N". This
+/// takes the first complete object and ignores whatever follows.
+fn parse_first_json_object(stdout: &str) -> Result<Value, String> {
+    let start = stdout
+        .find('{')
+        .ok_or("yt-dlp returned no JSON metadata".to_string())?;
+    let mut stream =
+        serde_json::Deserializer::from_str(&stdout[start..]).into_iter::<Value>();
+    match stream.next() {
+        Some(Ok(value)) => Ok(value),
+        Some(Err(e)) => Err(format!("Failed to parse yt-dlp JSON: {}", e)),
+        None => Err("yt-dlp returned no JSON metadata".to_string()),
+    }
+}
+
+fn run_yt_emitting(
+    app: &crate::ctx::AppHandle,
+    cmd: &mut Command,
+    label: &str,
+) -> Result<std::process::Output, std::io::Error> {
+    let output = cmd.output()?;
+    let _ = app.emit(
+        "yt-log",
+        format!("[{}] exit={}", label, output.status.code().unwrap_or(-1)),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in stderr.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            let _ = app.emit("yt-log", format!("[{}] {}", label, trimmed));
+        }
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+            let _ = app.emit("yt-log", format!("[{}] {}", label, trimmed));
+        }
+    }
+    Ok(output)
+}
+
+fn yt_dlp_command_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "yt-dlp.exe"
+    } else {
+        "yt-dlp"
+    }
+}
+
+fn yt_dlp_sidecar_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "yt-dlp-x86_64-pc-windows-msvc.exe"
+    } else if cfg!(target_os = "macos") {
+        "yt-dlp-x86_64-apple-darwin"
+    } else {
+        "yt-dlp-x86_64-unknown-linux-gnu"
+    }
+}
+
+fn yt_dlp_download_url() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+    } else if cfg!(target_os = "macos") {
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos.zip"
+    } else {
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
+    }
+}
+
+/// A real Windows executable starts with the `MZ` DOS header. This rejects
+/// placeholder/stub files (e.g. a 6-byte "stub" file) that `.exists()` accepts
+/// and Windows then tries to launch as a 16-bit program.
+#[cfg(target_os = "windows")]
+fn is_runnable_binary(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() < 1024 {
+        return false;
+    }
+    let mut magic = [0u8; 2];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .map(|()| &magic == b"MZ")
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_runnable_binary(path: &std::path::Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
+}
+
+fn app_bin_dir(app: &crate::ctx::AppHandle) -> Result<PathBuf, String> {
+    let base = app
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to resolve app local data dir: {}", e))?;
+    Ok(base.join("binaries"))
+}
+
+fn legacy_bin_dir() -> Result<PathBuf, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cwd: {}", e))?;
+    let bin_dir = if cwd.file_name().and_then(|n| n.to_str()) == Some("src-tauri") {
+        cwd.join("binaries")
+    } else {
+        cwd.join("src-tauri").join("binaries")
+    };
+    Ok(bin_dir)
+}
+
+fn push_cookie_args(args: &mut Vec<String>, cookie_path: &Option<String>, browser: &str) {
+    if let Some(cp) = cookie_path {
+        args.push("--cookies".to_string());
+        args.push(cp.clone());
+    } else {
+        args.push("--cookies-from-browser".to_string());
+        args.push(browser.to_string());
+    }
+}
+
+// YouTube's `web` player client is heavily throttled/restricted (limited
+// format list, sign-in walls, HTTP 403/120). Prefer clients that still return
+// full formats; `default` lets yt-dlp pick a working one as a fallback.
+const YT_PLAYER_CLIENTS: &str = "youtube:player_client=android,tv,web_safari,default";
+
+pub(crate) fn push_common_yt_flags(args: &mut Vec<String>, app: &crate::ctx::AppHandle) -> Result<(), String> {
+    args.push("--user-agent".to_string());
+    args.push(YT_UA.to_string());
+    args.push("--no-check-formats".to_string());
+    // Impersonate Chrome so YouTube/proxies don't reset yt-dlp's requests.
+    // Without this, bot-detection force-closes connections (10054/10061) and
+    // the format list comes back empty â†’ "Requested format is not available".
+    // Builds without curl_cffi reject the flag outright. Probe the binary
+    // this process will actually run, and probe again if that path changes
+    // (a sidecar installed later in the same session).
+    let bin = yt_dlp_bin_path(app).unwrap_or_else(|_| PathBuf::from(yt_dlp_command_name()));
+    if impersonate_available(&bin) {
+        args.push("--impersonate".to_string());
+        args.push("chrome".to_string());
+    }
+    push_yt_runtime_args(args, app)?;
+    args.push("--extractor-args".to_string());
+    args.push(YT_PLAYER_CLIENTS.to_string());
+    Ok(())
+}
+
+/// `--impersonate` needs curl_cffi inside the yt-dlp build; a plain install
+/// exits with `Impersonate target "chrome" is not available` and every run
+/// fails. Cached per binary path.
+fn impersonate_available(bin: &Path) -> bool {
+    static CACHE: Mutex<Option<(PathBuf, bool)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cached_flag(&mut cache, bin, &mut probe_impersonate)
+}
+
+/// Return the cached probe for `bin`, or run `probe` when the path is new.
+fn cached_flag(
+    cache: &mut Option<(PathBuf, bool)>,
+    bin: &Path,
+    probe: &mut impl FnMut(&Path) -> bool,
+) -> bool {
+    if let Some((path, ok)) = cache.as_ref() {
+        if path == bin {
+            return *ok;
+        }
+    }
+    let ok = probe(bin);
+    *cache = Some((bin.to_path_buf(), ok));
+    ok
+}
+
+fn probe_impersonate(bin: &Path) -> bool {
+    Command::new(bin)
+        .arg("--list-impersonate-targets")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("chrome"))
+        .unwrap_or(false)
+}
+
+fn push_yt_runtime_args(args: &mut Vec<String>, app: &crate::ctx::AppHandle) -> Result<(), String> {
+    let selected = {
+        let state = app.state();
+        let settings = lock(&state.proxy_settings)?;
+        settings.js_runtime.clone()
+    };
+
+    if let Some(runtime_id) = selected {
+        if runtime_id == crate::js_runtime::SYSTEM_NODE_ID {
+            args.push("--js-runtimes".to_string());
+            args.push("node".to_string());
+            args.push("--remote-components".to_string());
+            args.push("ejs:github".to_string());
+            return Ok(());
+        }
+
+        if let Ok(path) = crate::js_runtime::runtime_path(app, &runtime_id) {
+            if path.exists() {
+                args.push("--no-js-runtimes".to_string());
+                args.push("--js-runtimes".to_string());
+                args.push(format!("{}:{}", runtime_id, path.to_string_lossy()));
+                args.push("--remote-components".to_string());
+                args.push("ejs:github".to_string());
+                return Ok(());
+            }
+        }
+    }
+
+    // Default: prefer node if it is available on the system.
+    args.push("--js-runtimes".to_string());
+    args.push("node".to_string());
+    args.push("--remote-components".to_string());
+    args.push("ejs:github".to_string());
+    Ok(())
+}
+
+fn build_proxy_url(settings: &crate::state::ProxySettings) -> String {
+    if settings.proxy_type == "none" || settings.proxy_host.is_empty() {
+        return String::new();
+    }
+    let scheme = if settings.proxy_type == "socks5" {
+        "socks5"
+    } else {
+        "http"
+    };
+    let credentials = if !settings.proxy_user.is_empty() || !settings.proxy_pass.is_empty() {
+        format!(
+            "{}:{}@",
+            urlencoding::encode(&settings.proxy_user),
+            urlencoding::encode(&settings.proxy_pass)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "{}://{}{}:{}",
+        scheme, credentials, settings.proxy_host, settings.proxy_port
+    )
+}
+
+pub(crate) fn push_yt_proxy_args(args: &mut Vec<String>, app: &crate::ctx::AppHandle) -> Result<(), String> {
+    let state = app.state();
+    let settings = lock(&state.proxy_settings)?.clone();
+    let proxy_url = build_proxy_url(&settings);
+    if !proxy_url.is_empty() {
+        args.push("--proxy".to_string());
+        args.push(proxy_url);
+    }
+    Ok(())
+}
+
+fn redact_proxy_args(args: &[String]) -> Vec<String> {
+    let mut redacted = Vec::with_capacity(args.len());
+    let mut redact_next = false;
+    for arg in args {
+        if redact_next {
+            redacted.push("***".to_string());
+            redact_next = false;
+            continue;
+        }
+        redacted.push(arg.clone());
+        redact_next = arg == "--proxy";
+    }
+    redacted
+}
+
+fn extension_cookie_path(app: &crate::ctx::AppHandle) -> Option<String> {
+    let state = app.state();
+    // Prefer the in-memory path (set when /save-cookies last ran).
+    if let Some(p) = lock(&state.extension_cookies).ok().and_then(|g| g.clone()) {
+        return Some(p);
+    }
+    // Otherwise fall back to the stable temp file written by the extension so
+    // yt-dlp still gets cookies after the app restarts without falling back to
+    // --cookies-from-browser (which breaks on Chrome >= v127).
+    let fallback = std::env::temp_dir().join("moonhunt_cookies.txt");
+    if fallback.exists() {
+        // Only use the file if it actually contains cookie lines (the Netscape
+        // export always begins with comment headers).
+        let has_cookies = std::fs::read_to_string(&fallback)
+            .map(|s| s.lines().any(|l| !l.starts_with('#') && l.contains('\t')))
+            .unwrap_or(false);
+        if has_cookies {
+            return Some(fallback.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+fn download_location(app: &crate::ctx::AppHandle) -> Result<String, String> {
+    let state = app.state();
+    let guard = lock(&state.proxy_settings)?;
+    let loc = guard.download_location.clone();
+    drop(guard);
+    Ok(loc)
+}
+
+fn run_yt_bin(
+    app: &crate::ctx::AppHandle,
+    bin_path: &Path,
+    args: &[String],
+    label: &str,
+) -> Result<std::process::Output, std::io::Error> {
+    let mut cmd = if bin_path.exists() {
+        cmd_no_window(&bin_path.to_string_lossy())
+    } else {
+        cmd_no_window(yt_dlp_command_name())
+    };
+    run_yt_emitting(app, cmd.args(args), label)
+}
+
+/// Metadata-fetch budget: JS-challenge solving / first-run component setup can
+/// take a while, but the UI must never hang forever waiting on yt-dlp.
+const META_TIMEOUT_SECS: u64 = 120;
+
+/// Like `run_yt_bin`, but kills the child and errors out after `timeout_secs`.
+/// Reader threads stream stderr live to the log (stdout holds JSON metadata,
+/// so it is only buffered) while collecting both for the caller.
+async fn run_yt_bin_timeout(
+    app: &crate::ctx::AppHandle,
+    bin_path: &Path,
+    args: &[String],
+    label: &str,
+    timeout_secs: u64,
+) -> Result<std::process::Output, String> {
+    let mut cmd = if bin_path.exists() {
+        cmd_no_window(&bin_path.to_string_lossy())
+    } else {
+        cmd_no_window(yt_dlp_command_name())
+    };
+    let mut child = cmd
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to run yt-dlp: {}", e))?;
+
+    let stdout_buf = Arc::new(Mutex::new(Vec::<String>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let out_thread = child.stdout.take().map(|pipe| {
+        let buf = stdout_buf.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(pipe).lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+                let trimmed = line.trim().to_string();
+                if !trimmed.is_empty() {
+                    let _ = buf.lock().map(|mut v| v.push(trimmed));
+                }
+            }
+        })
+    });
+    let err_label = label.to_string();
+    let err_thread = child.stderr.take().map(|pipe| {
+        let buf = stderr_buf.clone();
+        let log_app = app.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(pipe).lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let _ = log_app.emit("yt-log", format!("[{}] {}", err_label, trimmed));
+                let _ = buf.lock().map(|mut v| v.push(trimmed.to_string()));
+            }
+        })
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        match child
+            .try_wait()
+            .map_err(|e| format!("Failed to poll yt-dlp: {}", e))?
+        {
+            Some(status) => {
+                if let Some(t) = out_thread {
+                    let _ = t.join();
+                }
+                if let Some(t) = err_thread {
+                    let _ = t.join();
+                }
+                let _ = app.emit(
+                    "yt-log",
+                    format!("[{}] exit={}", label, status.code().unwrap_or(-1)),
+                );
+                let stdout = stdout_buf
+                    .lock()
+                    .map(|g| g.join("\n"))
+                    .unwrap_or_default();
+                let stderr = stderr_buf
+                    .lock()
+                    .map(|g| g.join("\n"))
+                    .unwrap_or_default();
+                return Ok(std::process::Output {
+                    status,
+                    stdout: stdout.into_bytes(),
+                    stderr: stderr.into_bytes(),
+                });
+            }
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(t) = out_thread {
+                    let _ = t.join();
+                }
+                if let Some(t) = err_thread {
+                    let _ = t.join();
+                }
+                return Err(format!(
+                    "yt-dlp {} timed out after {}s â€” the network or YouTube's bot check may be stalling it",
+                    label, timeout_secs
+                ));
+            }
+            None => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+}
+
+/// Translate well-known yt-dlp failure output into a short user-facing
+/// message (DRM, login-walled, deleted/region-blocked, rate-limited).
+/// Returns None when nothing matches â€” callers fall back to raw output.
+fn friendly_yt_error(stderr: &str) -> Option<String> {
+    let lower = stderr.to_lowercase();
+    if lower.contains("drm") {
+        return Some("This video is DRM-protected and cannot be downloaded.".to_string());
+    }
+    if lower.contains("login required")
+        || lower.contains("log in to")
+        || lower.contains("private video")
+        || lower.contains("private tweet")
+        || lower.contains("account suspended")
+        || lower.contains("401 unauthorized")
+        || lower.contains("http error 401")
+    {
+        return Some(
+            "This post needs login or is private. Set browser cookies on the Media page and retry."
+                .to_string(),
+        );
+    }
+    if lower.contains("not found")
+        || lower.contains("http error 404")
+        || lower.contains("does not exist")
+        || lower.contains("has been deleted")
+        || lower.contains("no longer available")
+        || lower.contains("not available in your country")
+        || lower.contains("geo-restricted")
+    {
+        return Some("This post is unavailable (deleted, private, or region-blocked).".to_string());
+    }
+    if lower.contains("http error 429") || lower.contains("too many requests") {
+        return Some("The site is rate-limiting requests â€” wait a minute and retry.".to_string());
+    }
+    if lower.contains("requested format is not available") {
+        return Some(
+            "That quality just vanished from the post (formats rotate quickly) â€” rescan and pick again."
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// Cap raw stderr detail so the error box stays readable (full text stays in
+/// the backend console and the modal log).
+fn short_detail(stderr: &str) -> String {
+    const MAX: usize = 600;
+    let t = stderr.trim();
+    if t.len() <= MAX {
+        t.to_string()
+    } else {
+        format!("{}â€¦", t[..MAX].trim())
+    }
+}
+
+pub fn cancel_yt_scan(app: crate::ctx::AppHandle, scan_id: String) -> Result<(), String> {    if scan_id.trim().is_empty() {
+        return Err("A scan id is required to cancel a yt-dlp scan".to_string());
+    }
+
+    let state = app.state();
+    {
+        let mut cancelled = lock(&state.cancelled_yt_scans)?;
+        cancelled.insert(scan_id.clone());
+    }
+    let mut guard = lock(&state.active_yt_scan)?;
+    if let Some(mut child) = guard.remove(&scan_id) {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = app.emit("yt-log", format!("[scan] cancelled {}", scan_id));
+    }
+    Ok(())
+}
+
+fn choose_media_urls(meta: &Value) -> Vec<String> {
+    let mut chosen: Option<String> = None;
+    if let Some(u) = meta.get("url").and_then(|s| s.as_str()) {
+        chosen = Some(u.to_string());
+    }
+    if chosen.is_none() {
+        if let Some(rf) = meta.get("requested_formats").and_then(|v| v.as_array()) {
+            for f in rf {
+                let has_audio = f
+                    .get("acodec")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s != "none")
+                    .unwrap_or(false);
+                let has_video = f
+                    .get("vcodec")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s != "none")
+                    .unwrap_or(false);
+                if has_audio && has_video {
+                    if let Some(u) = f.get("url").and_then(|s| s.as_str()) {
+                        chosen = Some(u.to_string());
+                        break;
+                    }
+                }
+            }
+            if chosen.is_none() {
+                if let Some(f0) = rf.first() {
+                    if let Some(u) = f0.get("url").and_then(|s| s.as_str()) {
+                        chosen = Some(u.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if chosen.is_none() {
+        if let Some(frames) = meta.get("formats").and_then(|v| v.as_array()) {
+            for f in frames.iter().rev() {
+                let has_audio = f
+                    .get("acodec")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s != "none")
+                    .unwrap_or(false);
+                let has_video = f
+                    .get("vcodec")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s != "none")
+                    .unwrap_or(false);
+                if has_audio && has_video {
+                    if let Some(u) = f.get("url").and_then(|s| s.as_str()) {
+                        chosen = Some(u.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(u) = chosen {
+        return vec![u];
+    }
+    let mut all = Vec::new();
+    if let Some(rf) = meta.get("requested_formats").and_then(|v| v.as_array()) {
+        for f in rf {
+            if let Some(u) = f.get("url").and_then(|s| s.as_str()) {
+                all.push(u.to_string());
+            }
+        }
+    }
+    if all.is_empty() {
+        if let Some(u) = meta.get("url").and_then(|s| s.as_str()) {
+            all.push(u.to_string());
+        }
+    }
+    all
+}
+
+fn collect_http_headers(meta: &Value, ytdlp_token: &str, page_url: &str) -> Vec<String> {
+    let mut hdrs = vec![format!("X-Moonhunt-YTDLP:{}", ytdlp_token)];
+    let mut push_obj = |obj: &serde_json::Map<String, Value>| {
+        for (k, v) in obj {
+            if let Some(s) = v.as_str() {
+                hdrs.push(format!("{}:{}", k, s));
+            }
+        }
+    };
+    if let Some(hobj) = meta.get("http_headers").and_then(|v| v.as_object()) {
+        push_obj(hobj);
+    }
+    if let Some(rf) = meta.get("requested_formats").and_then(|v| v.as_array()) {
+        for f in rf {
+            if let Some(hf) = f.get("http_headers").and_then(|v| v.as_object()) {
+                push_obj(hf);
+            }
+        }
+    }
+    if let Some(frames) = meta.get("formats").and_then(|v| v.as_array()) {
+        for f in frames {
+            if let Some(hf) = f.get("http_headers").and_then(|v| v.as_object()) {
+                push_obj(hf);
+            }
+        }
+    }
+    if !hdrs
+        .iter()
+        .any(|h| h.to_lowercase().starts_with("user-agent:"))
+    {
+        hdrs.push(format!("User-Agent:{}", YT_UA));
+    }
+    if !page_url.trim().is_empty() {
+        hdrs.push(format!("Referer:{}", page_url));
+    }
+    hdrs
+}
+
+/// Best-effort recovery of yt-dlp's real output filename inside `dir` when
+/// the `--print after_move` marker was missed. Matches by exact name, then
+/// by stem (remux changed the extension), then by sanitization-insensitive
+/// stem (yt-dlp rewrote the title). Non-recursive (top level only) to stay
+/// cheap on huge download folders.
+fn find_best_filename_match(dir: &Path, predicted: &str) -> Option<PathBuf> {
+    let want_stem = predicted
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(predicted)
+        .rfind('.')
+        .map(|i| predicted[..i].to_lowercase())
+        .unwrap_or_else(|| predicted.to_lowercase());
+    let want_key: String = want_stem.chars().filter(|c| c.is_alphanumeric()).collect();
+    let mut key_hit: Option<PathBuf> = None;
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(n) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if n.eq_ignore_ascii_case(predicted) {
+            return Some(path);
+        }
+        let stem = n.rfind('.').map(|i| n[..i].to_lowercase()).unwrap_or_else(|| n.to_lowercase());
+        if stem == want_stem {
+            return Some(path);
+        }
+        if key_hit.is_none() && !want_key.is_empty() {
+            let key: String = stem.chars().filter(|c| c.is_alphanumeric()).collect();
+            if key == want_key {
+                key_hit = Some(path.clone());
+            }
+        }
+    }
+    key_hit
+}
+
+fn persist_complete(
+    app: &crate::ctx::AppHandle,
+    gid: String,
+    filename: &str,
+    url: &str,
+    download_dir: &str,
+    ytdlp_token: &str,
+    source_event: &str,
+    final_path: Option<&Path>,
+) -> Result<String, String> {
+    // If the user cancelled/paused/removed this download, do not resurrect it.
+    if crate::extension::cancelled_gids().contains(&gid) {
+        println!("[yt-dlp] Skipping persist_complete for cancelled gid {}", gid);
+        return Ok(gid);
+    }
+    // yt-dlp sanitizes titles and picks the real container ext itself, so the
+    // predicted `filename` often differs from what's on disk (e.g. X posts).
+    // Prefer the --print after_move path captured during the download; if it
+    // is missing, scan the download dir for the best stem/sanitized match
+    // before falling back to the predicted name (a wrong persisted path
+    // would later tag the row as removed even though the file exists).
+    let (record_filename, record_path): (String, PathBuf) = match final_path {
+        Some(p) => (
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| filename.to_string()),
+            p.to_path_buf(),
+        ),
+        None => match find_best_filename_match(Path::new(download_dir), filename) {
+            Some(found) => (
+                found
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| filename.to_string()),
+                found,
+            ),
+            None => (filename.to_string(), Path::new(download_dir).join(filename)),
+        },
+    };
+    let size = std::fs::metadata(&record_path)
+        .map(|m| format_bytes(m.len()))
+        .unwrap_or_else(|_| "0 B".to_string());
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let record = DownloadRecord {
+        gid: gid.clone(),
+        filename: record_filename.clone(),
+        url: url.to_string(),
+        size,
+        status: "complete".to_string(),
+        progress: 100,
+        added_at: now_ms,
+        path: Some(record_path.to_string_lossy().to_string()),
+        connections: None,
+        source: Some("yt-dlp".to_string()),
+        ytdlp_token: Some(ytdlp_token.to_string()),
+        proxy: None,
+        size_bytes: None,
+    };
+    crate::db::upsert_download(app.clone(), record)?;
+    let _ = app.emit(
+        "yt-dl-complete",
+        json!({"gid": gid, "filename": record_filename, "source": source_event}),
+    );
+    Ok(gid)
+}
+
+fn persist_error(
+    app: &crate::ctx::AppHandle,
+    gid: String,
+    filename: &str,
+    url: &str,
+    download_dir: &str,
+    message: &str,
+) {
+    // A cancelled/paused/removed download must not be resurrected as an error.
+    if crate::extension::cancelled_gids().contains(&gid) {
+        println!("[yt-dlp] Skipping persist_error for cancelled gid {}", gid);
+        return;
+    }
+    // A user-paused download keeps its partial progress instead of an error.
+    if app
+        .state()
+        .paused_yt_downloads
+        .lock()
+        .map(|s| s.contains(&gid))
+        .unwrap_or(false)
+    {
+        println!("[yt-dlp] Skipping persist_error for paused gid {}", gid);
+        return;
+    }
+    let file_path = Path::new(download_dir).join(filename);
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let record = DownloadRecord {
+        gid: gid.clone(),
+        filename: filename.to_string(),
+        url: url.to_string(),
+        size: "0".to_string(),
+        status: "error".to_string(),
+        progress: 100,
+        added_at: now_ms,
+        path: Some(file_path.to_string_lossy().to_string()),
+        connections: Some(1),
+        source: Some("yt-dlp".to_string()),
+        ytdlp_token: None,
+        proxy: None,
+        size_bytes: None,
+    };
+    if let Err(e) = crate::db::upsert_download(app.clone(), record) {
+        println!("[!] Failed to persist yt-dlp error record: {}", e);
+    }
+    // Persist the reason on the row so the Downloads details modal can show
+    // *why* it failed (the row otherwise carries no message).
+    if let Err(e) = crate::db::set_download_error_message(&gid, message) {
+        println!("[!] Failed to persist yt-dlp error message: {}", e);
+    }
+    let _ = app.emit(
+        "yt-dl-error",
+        json!({"gid": gid, "filename": filename, "error": message}),
+    );
+}
+
+#[derive(Clone, Copy)]
+struct YtProgress {
+    total: u64,
+    completed: u64,
+    speed: u64,
+}
+
+fn parse_yt_size(raw: &str) -> Option<u64> {
+    let raw = raw.trim().replace(',', "");
+    if raw.is_empty() {
+        return None;
+    }
+    let split = raw.find(|c: char| c.is_ascii_alphabetic())?;
+    let num: f64 = raw[..split].trim().parse().ok()?;
+    let unit = raw[split..].trim().to_ascii_lowercase();
+    let mult: u64 = match unit.as_str() {
+        "b" => 1,
+        "kib" | "kb" => 1024,
+        "mib" | "mb" => 1024 * 1024,
+        "gib" | "gb" => 1024 * 1024 * 1024,
+        "tib" | "tb" => 1024_u64.pow(4),
+        _ => return None,
+    };
+    Some((num * mult as f64) as u64)
+}
+
+fn parse_yt_progress(line: &str) -> Option<YtProgress> {
+    let line = line.trim();
+    if !line.contains("[download]") {
+        return None;
+    }
+    let trimmed = &line[line.find("[download]")?..];
+
+    let mut total: Option<u64> = None;
+    let mut speed: Option<u64> = None;
+    let mut percent: Option<f64> = None;
+
+    let mut parts = trimmed.split_whitespace();
+    while let Some(part) = parts.next() {
+        if part.ends_with('%') {
+            percent = part.trim_end_matches('%').parse::<f64>().ok();
+            continue;
+        }
+        if part == "of" {
+            let mut raw = parts.next().unwrap_or("");
+            if raw == "~" {
+                raw = parts.next().unwrap_or("");
+            }
+            total = parse_yt_size(raw);
+            continue;
+        }
+        if part == "at" {
+            if let Some(raw) = parts.next() {
+                speed = parse_yt_size(raw.trim_end_matches("/s"));
+            }
+        }
+    }
+
+    if percent.is_none() && speed.is_none() {
+        return None;
+    }
+
+    let completed = percent
+        .zip(total)
+        .map(|(p, t)| ((p / 100.0) * t as f64) as u64)
+        .unwrap_or(0);
+    Some(YtProgress {
+        total: total.unwrap_or(0),
+        completed,
+        speed: speed.unwrap_or(0),
+    })
+}
+
+/// Returns true when the user selected the experimental byte-counter progress
+/// engine in General settings. Legacy is the default.
+fn progress_engine_is_experimental(app: &crate::ctx::AppHandle) -> bool {
+    app.state()
+        .proxy_settings
+        .lock()
+        .map(|s| {
+            s.progress_engine
+                .as_deref()
+                .map(|v| v.eq_ignore_ascii_case("experimental"))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// Live health of a direct yt-dlp download: is the child process still
+/// registered (alive), or has it already exited / never started?
+/// Used by the frontend diagnostics section (live checker #1).
+pub fn get_yt_download_health(
+    app: crate::ctx::AppHandle,
+    gid: String,
+) -> Result<serde_json::Value, String> {
+    let alive = app
+        .state()
+        .active_yt_downloads
+        .lock()
+        .map(|g| g.contains_key(&gid))
+        .unwrap_or(false);
+    Ok(json!({"gid": gid, "alive": alive}))
+}
+
+#[derive(Clone, Copy, Default)]
+struct YtExperimentalProgress {
+    /// Fixed denominator: largest total seen so far for this gid.
+    peak_total: u64,
+    /// Monotonic completed bytes against the fixed denominator.
+    peak_completed: u64,
+    /// True while yt-dlp is in its merge/remux phase (not downloading).
+    merging: bool,
+}
+
+fn update_yt_progress(
+    app: &crate::ctx::AppHandle,
+    gid: &str,
+    filename: &str,
+    url: &str,
+    download_dir: &str,
+    ytdlp_token: &str,
+    added_at: i64,
+    progress: &YtProgress,
+    persist: bool,
+    experimental: Option<&YtExperimentalProgress>,
+) {
+    // Experimental: fixed denominator + monotonic bytes, so the
+    // video -> audio -> merge stages can't reset the bar (70% -> 1%).
+    // Legacy: per-line percent (kept byte-identical to previous behavior).
+    let (shown_total, shown_completed, phase) = match experimental {
+        Some(exp) if exp.peak_total > 0 => (
+            exp.peak_total,
+            exp.peak_completed.min(exp.peak_total),
+            if exp.merging { "merging" } else { "downloading" },
+        ),
+        _ => (progress.total, progress.completed, "downloading"),
+    };
+    let file_path = Path::new(download_dir).join(filename);
+    let percent = if shown_total > 0 {
+        ((shown_completed as f64 / shown_total as f64) * 100.0).round() as i32
+    } else {
+        0
+    };
+    let size_display = if shown_total > 0 {
+        format!(
+            "{} / {}",
+            format_bytes(shown_completed),
+            format_bytes(shown_total)
+        )
+    } else {
+        "0 B / 0 B".to_string()
+    };
+
+    let record = DownloadRecord {
+        gid: gid.to_string(),
+        filename: filename.to_string(),
+        url: url.to_string(),
+        size: size_display,
+        status: "active".to_string(),
+        progress: percent,
+        added_at,
+        path: Some(file_path.to_string_lossy().to_string()),
+        connections: Some(1),
+        source: Some("yt-dlp".to_string()),
+        ytdlp_token: Some(ytdlp_token.to_string()),
+        proxy: None,
+        size_bytes: None,
+    };
+    if persist {
+        if let Err(e) = crate::db::upsert_download(app.clone(), record) {
+            println!("[!] Failed to persist yt-dlp progress (non-fatal): {}", e);
+        }
+    }
+
+    let header = format!("X-Moonhunt-YTDLP:{}", ytdlp_token);
+    let engine_tag = if experimental.is_some() { "experimental" } else { "legacy" };
+    let item = json!({
+        "gid": gid,
+        "status": "active",
+        "totalLength": shown_total.to_string(),
+        "completedLength": shown_completed.to_string(),
+        "downloadSpeed": progress.speed.to_string(),
+        "uploadSpeed": "0",
+        "connections": "1",
+        "split": "1",
+        "ytPhase": phase,
+        "ytEngine": engine_tag,
+        "ytPeakTotal": shown_total.to_string(),
+        "ytPeakCompleted": shown_completed.to_string(),
+        "requestHeaders": [header.clone()],
+        "files": [{
+            "path": file_path.to_string_lossy().to_string(),
+            "length": shown_total.to_string(),
+            "completedLength": shown_completed.to_string(),
+            "uris": [{
+                "uri": url,
+                "status": "used",
+                "downloadSpeed": progress.speed.to_string(),
+                "requestHeaders": [header]
+            }],
+            "requestHeaders": [header]
+        }]
+    });
+    let _ = app.emit("downloads-changed", vec![item]);
+}
+
+/// Cancels a running direct yt-dlp download by PID and removes the synthetic
+/// DB row. Used by pause/remove from the UI.
+#[cfg(target_os = "windows")]
+fn kill_pid(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    // taskkill is available on all Windows versions and works without elevation
+    // for child processes we spawned.
+    if let Ok(mut cmd) = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F", "/T"])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .spawn()
+    {
+        let _ = cmd.wait();
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn kill_pid(pid: u32) {
+    // libc::kill(pid, SIGKILL) is the standard cross-nix approach; fall back to
+    // `kill` if libc isn't linked. Using the CLI is simplest and dependency-free.
+    if let Ok(mut cmd) = Command::new("kill").args(["-9", &pid.to_string()]).spawn() {
+        let _ = cmd.wait();
+    }
+}
+
+/// Cancel a running direct yt-dlp download by killing its process and removing
+/// the synthetic DB row. Used by pause/remove from the UI.
+pub fn cancel_yt_download(app: crate::ctx::AppHandle, gid: String) -> Result<(), String> {
+    if !gid.starts_with("yt-dlp-direct-") {
+        return Err(format!("Not a direct yt-dlp download: {}", gid));
+    }
+    let state = app.state();
+    let pid = {
+        let registry = state.active_yt_downloads.clone();
+        let mut guard = registry.lock().map_err(|e| e.to_string())?;
+        guard.remove(&gid).unwrap_or(0)
+    };
+    if pid != 0 {
+        kill_pid(pid);
+        let _ = app.emit("yt-log", format!("[direct] cancelling {} (pid {})", gid, pid));
+    }
+    // Mark cancelled so the poller never re-shows the row as complete.
+    crate::extension::mark_cancelled(&gid);
+    if let Ok(mut paused) = state.paused_yt_downloads.lock() {
+        paused.remove(&gid);
+    }
+    let _ = crate::db::remove_download_from_db(app.clone(), gid.clone());
+    let _ = app.emit("downloads-changed", json!([]));
+    Ok(())
+}
+
+/// Pause a running direct yt-dlp download: kill the child process and keep
+/// the DB row as `paused` (with last progress) so Resume can re-run it from
+/// the stored record. Unlike `cancel_yt_download` the row is NOT removed.
+pub fn pause_yt_download(app: crate::ctx::AppHandle, gid: String) -> Result<String, String> {
+    if !gid.starts_with("yt-dlp-direct-") {
+        return Err(format!("Not a direct yt-dlp download: {}", gid));
+    }
+    let state = app.state();
+    // Flag first: the download thread checks this after `wait()` and will
+    // persist `paused` instead of `error`.
+    {
+        let mut paused = state.paused_yt_downloads.lock().map_err(|e| e.to_string())?;
+        paused.insert(gid.clone());
+    }
+    let pid = {
+        let registry = state.active_yt_downloads.clone();
+        let mut guard = registry.lock().map_err(|e| e.to_string())?;
+        guard.remove(&gid).unwrap_or(0)
+    };
+    if pid != 0 {
+        kill_pid(pid);
+        let _ = app.emit("yt-log", format!("[direct] pausing {} (pid {})", gid, pid));
+    }
+    // Give the download thread a moment to record the paused row itself;
+    // if it already exited, write the paused row from the current DB state.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let existing = crate::db::get_download_by_gid(app.clone(), gid.clone())
+        .ok()
+        .flatten();
+    if let Some(row) = existing {
+        let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if status == "active" || status == "waiting" {
+            let record = DownloadRecord {
+                gid: gid.clone(),
+                filename: row.get("filename").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                url: row.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                size: row.get("size").and_then(|v| v.as_str()).unwrap_or("0").to_string(),
+                status: "paused".to_string(),
+                progress: row.get("progress").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                added_at: row.get("added_at").and_then(|v| v.as_i64()).unwrap_or(0),
+                path: row.get("path").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                connections: row.get("connections").and_then(|v| v.as_i64()).map(|n| n as i32),
+                source: row.get("source").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                ytdlp_token: row.get("ytdlp_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                proxy: row.get("proxy").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                size_bytes: None,
+            };
+            let _ = crate::db::upsert_download(app.clone(), record);
+        }
+    }
+    let _ = app.emit("downloads-changed", json!([]));
+    Ok(format!("Media download paused ({})", gid))
+}
+
+/// Re-run a paused/cancelled/error direct media download from its stored DB
+/// record. This is "resume" for yt-dlp-direct rows (which can't be resumed
+/// mid-file). The old row is dropped once the new download starts so the
+/// list never shows two cards for one file.
+pub async fn resume_yt_download(app: crate::ctx::AppHandle, gid: String) -> Result<String, String> {
+    if !gid.starts_with("yt-dlp-direct-") {
+        return Err(format!("Not a direct yt-dlp download: {}", gid));
+    }
+    let record = crate::db::get_download_by_gid(app.clone(), gid.clone())
+        .ok()
+        .flatten();
+    let url = record
+        .as_ref()
+        .and_then(|r| r.get("url").and_then(|u| u.as_str()))
+        .unwrap_or("")
+        .to_string();
+    if url.trim().is_empty() || !url.starts_with("http") {
+        return Err("No source URL to resume".to_string());
+    }
+    let dir = record.as_ref().and_then(|r| {
+        r.get("path")
+            .and_then(|p| p.as_str())
+            .and_then(|p| std::path::Path::new(p).parent().map(|d| d.to_string_lossy().into_owned()))
+    });
+    let new_gid = add_yt_download(
+        app.clone(),
+        url.clone(),
+        "mp4".to_string(),
+        Some("best".to_string()),
+        dir,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    // The old paused/error row served its purpose â€” drop it so the list
+    // shows a single card for the restarted download.
+    if new_gid != gid {
+        let _ = crate::db::remove_download_from_db(app.clone(), gid.clone());
+    }
+    // No longer paused: the new run owns this URL now.
+    if let Ok(mut paused) = app.state().paused_yt_downloads.lock() {
+        paused.remove(&gid);
+    }
+    Ok(format!("Media download restarted ({})", new_gid))
+}
+
+fn run_direct_yt_download(
+    app: crate::ctx::AppHandle,
+    bin_path: PathBuf,
+    args: Vec<String>,
+    gid: String,
+    filename: String,
+    url: String,
+    download_dir: String,
+    ytdlp_token: String,
+    added_at: i64,
+) {
+    let state = app.state();
+
+    // YouTube intermittently resets connections (exit 120 / "connection
+    // reset") or briefly drops specific formats (SABR/DRM experiments), which
+    // surfaces as "Requested format is not available". Retry the same args if
+    // no progress was made, but if the specific-format download keeps failing,
+    // fall back to the generic bestvideo+bestaudio merge so the download still
+    // completes. The fallback args drop any user-picked -f <id> and any
+    // --remux-video (merge produces an mp4 already).
+    // A "best effort" arg set for the retry: keep everything except the
+    // `-f <id>`/`--merge-output-format`/`--remux-video` format flags, then
+    // append a generic bestvideo+bestaudio merge. The filter keeps every
+    // argument whose PREVIOUS token is not a format/merge flag.
+    let mut fallback_args: Vec<String> = Vec::new();
+    let mut had_extract_audio = false;
+    {
+        // Only value-taking flags consume their following token. `--extract-audio`
+        // is a boolean flag â€” skipping the next token would swallow the following
+        // `--audio-format` and leave its `mp3` value orphaned as a bogus URL arg.
+        let mut skip_next = false;
+        for a in &args {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            match a.as_str() {
+                "-f" | "--merge-output-format" | "--remux-video" | "--audio-format"
+                | "--audio-quality" => {
+                    skip_next = true;
+                }
+                "--extract-audio" => {
+                    had_extract_audio = true;
+                }
+                _ => fallback_args.push(a.clone()),
+            }
+        }
+    }
+    if had_extract_audio {
+        // Keep the user's audio-only request: grab the best audio stream and
+        // re-extract to mp3 instead of silently merging a video track.
+        fallback_args.push("-f".to_string());
+        fallback_args.push("bestaudio/best".to_string());
+        fallback_args.push("--extract-audio".to_string());
+        fallback_args.push("--audio-format".to_string());
+        fallback_args.push("mp3".to_string());
+        fallback_args.push("--audio-quality".to_string());
+        fallback_args.push("0".to_string());
+    } else {
+        fallback_args.push("-f".to_string());
+        // /best rescues muxed-only listings (e.g. X), where bestvideo matches
+        // nothing and the merge would fail outright.
+        fallback_args.push("bestvideo+bestaudio/best".to_string());
+        fallback_args.push("--merge-output-format".to_string());
+        fallback_args.push("mp4".to_string());
+    }
+
+    // YouTube intermittently resets connections (exit 120 / "connection
+    // reset"). A single retry that made no progress usually succeeds.
+    let max_attempts = 2;
+    let mut last_attempt_used_fallback = false;
+    for attempt in 1..=max_attempts {
+        // The user may have cancelled/paused while a previous attempt was
+        // dying or during the retry sleep; never relaunch in that case.
+        if crate::extension::cancelled_gids().contains(&gid) {
+            return;
+        }
+        if app
+            .state()
+            .paused_yt_downloads
+            .lock()
+            .map(|s| s.contains(&gid))
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let attempt_args: &[String] = if attempt > 1 && !last_attempt_used_fallback {
+            // The specific format may have vanished (SABR/DRM transient); fall
+            // back to a generic bestvideo+bestaudio merge on retry.
+            &fallback_args
+        } else {
+            &args
+        };
+        let mut cmd = if bin_path.exists() {
+            cmd_no_window(&bin_path.to_string_lossy())
+        } else {
+            cmd_no_window(yt_dlp_command_name())
+        };
+        if attempt > 1 && !last_attempt_used_fallback {
+            last_attempt_used_fallback = true;
+        }
+        cmd.args(attempt_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = format!("Failed to execute yt-dlp direct: {}", e);
+                println!("[âœ—] {}", msg);
+                persist_error(&app, gid, &filename, &url, &download_dir, &msg);
+                return;
+            }
+        };
+
+        // Register the running child's PID so pause/remove can terminate it by gid.
+        {
+            let registry = state.active_yt_downloads.clone();
+            let mut guard = registry.lock().unwrap_or_else(|e| e.into_inner());
+            guard.insert(gid.clone(), child.id());
+        }
+
+        // yt-dlp writes its `[download]` progress lines to stdout, while
+        // warnings/errors go to stderr. Drain stderr on a separate thread so
+        // a chatty stderr stream can never block the progress reader. Keep the
+        // last lines in a shared buffer so the failure message can show them.
+        let stderr_buf: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        if let Some(stderr) = child.stderr.take() {
+            let log_app = app.clone();
+            let buf = stderr_buf.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(stderr).lines() {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(_) => break,
+                    };
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        let _ = log_app.emit("yt-log", format!("[direct] {}", trimmed));
+                        if let Ok(mut v) = buf.lock() {
+                            v.push(trimmed.to_string());
+                            if v.len() > 20 {
+                                v.remove(0);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        let mut saw_progress = false;
+        let experimental_mode = progress_engine_is_experimental(&app);
+        // Legacy: 500ms emit / 2s persist (unchanged behavior).
+        // Experimental: 150ms emit / 5s persist, memory-only live ticks.
+        let emit_every = if experimental_mode {
+            Duration::from_millis(150)
+        } else {
+            Duration::from_millis(500)
+        };
+        let persist_every = if experimental_mode {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_secs(2)
+        };
+        let mut last_progress_emit = Instant::now() - emit_every;
+        let mut last_progress_persist = Instant::now() - persist_every;
+        let mut last_completed: u64 = 0;
+        // Experimental fixed denominator: largest total seen,
+        // monotonic completed bytes against it. Survives video->audio->merge.
+        let mut peak_total: u64 = 0;
+        let mut peak_completed: u64 = 0;
+        let mut merging = false;
+        let mut final_path: Option<PathBuf> = None;
+        if let Some(stdout) = child.stdout.take() {
+            for line in BufReader::new(stdout).lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+                let trimmed = line.trim();
+                // Real final path reported via --print after_move (see args
+                // setup). Captured for the completed record; not log spam.
+                if let Some(p) = trimmed.strip_prefix(FILEPATH_MARKER) {
+                    let pb = PathBuf::from(p.trim());
+                    if !pb.as_os_str().is_empty() {
+                        final_path = Some(pb);
+                    }
+                    continue;
+                }
+                if let Some(mut progress) = parse_yt_progress(&trimmed) {
+                    saw_progress = true;
+                    if progress.total > 0 && progress.completed > progress.total {
+                        progress.completed = progress.total;
+                    }
+                    // Progress lines from yt-dlp can briefly dip while it retries
+                    // fragments or switches between streams. Keep the UI monotonic
+                    // so the progress bar never visibly moves backwards.
+                    if progress.completed < last_completed {
+                        progress.completed = last_completed;
+                    } else {
+                        last_completed = progress.completed;
+                    }
+                    // Experimental accumulator: fixed denominator = max total
+                    // seen; completed never moves backwards (fixed-denominator
+                    // byte counters instead of per-file percent resets).
+                    let exp_state = if experimental_mode {
+                        if progress.total > peak_total {
+                            peak_total = progress.total;
+                        }
+                        if progress.completed > peak_completed {
+                            peak_completed = progress.completed.min(peak_total.max(1));
+                        }
+                        Some(YtExperimentalProgress {
+                            peak_total,
+                            peak_completed,
+                            merging,
+                        })
+                    } else {
+                        None
+                    };
+                    let finished = if experimental_mode {
+                        peak_total > 0 && peak_completed >= peak_total
+                    } else {
+                        progress.total > 0 && progress.completed >= progress.total
+                    };
+                    if last_progress_emit.elapsed() >= emit_every || finished {
+                        let persist =
+                            last_progress_persist.elapsed() >= persist_every || finished;
+                        update_yt_progress(
+                            &app,
+                            &gid,
+                            &filename,
+                            &url,
+                            &download_dir,
+                            &ytdlp_token,
+                            added_at,
+                            &progress,
+                            persist,
+                            exp_state.as_ref(),
+                        );
+                        last_progress_emit = Instant::now();
+                        if persist {
+                            last_progress_persist = Instant::now();
+                        }
+                    }
+                } else if !trimmed.is_empty() {
+                    // Experimental: [Merger]/[ExtractAudio] lines mean bytes
+                    // are done â€” yt-dlp is remuxing. Surface as a separate
+                    // phase instead of letting the bar stall or reset.
+                    if experimental_mode
+                        && (trimmed.contains("[Merger]")
+                            || trimmed.contains("[ExtractAudio]")
+                            || trimmed.contains("Merging formats"))
+                    {
+                        if !merging {
+                            merging = true;
+                            // Bytes are done â€” tell the UI now (no more
+                            // [download] lines will arrive during remux).
+                            let exp_now = YtExperimentalProgress {
+                                peak_total: peak_total.max(1),
+                                peak_completed: peak_completed.min(peak_total.max(1)),
+                                merging: true,
+                            };
+                            let stuck = YtProgress { total: 0, completed: 0, speed: 0 };
+                            update_yt_progress(
+                                &app,
+                                &gid,
+                                &filename,
+                                &url,
+                                &download_dir,
+                                &ytdlp_token,
+                                added_at,
+                                &stuck,
+                                false,
+                                Some(&exp_now),
+                            );
+                            last_progress_emit = Instant::now();
+                        }
+                    }
+                    // Progress lines already update the download row; don't also
+                    // flood the log panel and WebView DOM with them.
+                    let _ = app.emit("yt-log", format!("[direct] {}", trimmed));
+                }
+            }
+        }
+
+        let status = child.wait();
+        // Remove the tracked PID now that this attempt's child has exited.
+        {
+            let registry = state.active_yt_downloads.clone();
+            let mut guard = registry.lock().unwrap_or_else(|e| e.into_inner());
+            guard.remove(&gid);
+        }
+
+        match status {
+            Ok(exit) if exit.success() => {
+                // Prefer yt-dlp's reported final path (verified on disk);
+                // fall back to the predicted name when absent.
+                let resolved = final_path.filter(|p| p.exists());
+                if resolved.is_some() {
+                    let _ = app.emit(
+                        "yt-log",
+                        "[direct] Final file confirmed from yt-dlp report.".to_string(),
+                    );
+                } else {
+                    let _ = app.emit(
+                        "yt-log",
+                        "[direct] No final path reported â€” using predicted filename.".to_string(),
+                    );
+                }
+                if let Err(e) = persist_complete(
+                    &app,
+                    gid.clone(),
+                    &filename,
+                    &url,
+                    &download_dir,
+                    &ytdlp_token,
+                    "yt-dlp-direct",
+                    resolved.as_deref(),
+                ) {
+                    println!("[!] Failed to persist completed yt-dlp download: {}", e);
+                    persist_error(&app, gid.clone(), &filename, &url, &download_dir, &e);
+                }
+                return;
+            }
+            Ok(exit) => {
+                let tail = stderr_buf
+                    .lock()
+                    .map(|g| g.join("\n"))
+                    .unwrap_or_default();
+                let msg = format!(
+                    "yt-dlp direct download failed with exit code {}{}",
+                    exit.code().unwrap_or(-1),
+                    if tail.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n{}", tail)
+                    }
+                );
+                // Lead with a plain-language cause when the tail matches a
+                // known failure (DRM, login-walled, deleted, throttled).
+                let msg = match friendly_yt_error(&tail) {
+                    Some(f) => format!("{}\n\nDetails:\n{}", f, short_detail(&msg)),
+                    None => msg,
+                };
+                // Retry only if the attempt made no progress (transient reset
+                // before any bytes) and we haven't exhausted attempts.
+                if !saw_progress && attempt < max_attempts {
+                    println!("[~] Retrying direct yt-dlp download (attempt {}/{})", attempt, max_attempts);
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+                println!("[âœ—] {}", msg);
+                persist_error(&app, gid.clone(), &filename, &url, &download_dir, &msg);
+                return;
+            }
+            Err(e) => {
+                let msg = format!("Failed to wait for yt-dlp direct: {}", e);
+                println!("[âœ—] {}", msg);
+                persist_error(&app, gid.clone(), &filename, &url, &download_dir, &msg);
+                return;
+            }
+        }
+    }
+}
+
+pub async fn scan_yt_formats(
+    app: crate::ctx::AppHandle,
+    url: String,
+    browser: Option<String>,
+    scan_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let bin_path = yt_dlp_bin_path(&app)?;
+    let selected_browser = browser.unwrap_or_else(|| "firefox".to_string());
+    let cookie_path = extension_cookie_path(&app);
+
+    let mut meta_args: Vec<String> = Vec::new();
+    meta_args.push("--no-config".to_string());
+    meta_args.push("-j".to_string());
+    meta_args.push("--no-warnings".to_string());
+    meta_args.push("--no-playlist".to_string());
+    meta_args.push("--socket-timeout".to_string());
+    meta_args.push("30".to_string());
+    push_cookie_args(&mut meta_args, &cookie_path, &selected_browser);
+    push_common_yt_flags(&mut meta_args, &app)?;
+    push_yt_proxy_args(&mut meta_args, &app)?;
+    meta_args.push(url.clone());
+
+    let scan_key = scan_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let mut cmd = if bin_path.exists() {
+        cmd_no_window(&bin_path.to_string_lossy())
+    } else {
+        cmd_no_window(yt_dlp_command_name())
+    };
+    cmd.args(&meta_args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to run yt-dlp: {}", e))?;
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let state = app.state();
+    {
+        let mut guard = lock(&state.active_yt_scan)?;
+        guard.insert(scan_key.clone(), child);
+    }
+    {
+        let cancelled = lock(&state.cancelled_yt_scans)?;
+        if cancelled.contains(&scan_key) {
+            drop(cancelled);
+            let mut guard = lock(&state.active_yt_scan)?;
+            if let Some(mut child) = guard.remove(&scan_key) {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return Err("Scan cancelled".to_string());
+        }
+    }
+
+    let stdout_lines = Arc::new(Mutex::new(Vec::new()));
+    let stderr_lines = Arc::new(Mutex::new(Vec::new()));
+
+    let stdout_writer = stdout_lines.clone();
+    let stdout_thread = stdout_pipe.map(|pipe| {
+        std::thread::spawn(move || {
+            for line in BufReader::new(pipe).lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+                let trimmed = line.trim().to_string();
+                if !trimmed.is_empty() {
+                    let _ = stdout_writer.lock().map(|mut v| v.push(trimmed));
+                }
+            }
+        })
+    });
+
+    let stderr_writer = stderr_lines.clone();
+    let stderr_thread = stderr_pipe.map(|pipe| {
+        let log_app = app.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(pipe).lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    let _ = log_app.emit("yt-log", format!("[scan] {}", trimmed));
+                    let _ = stderr_writer
+                        .lock()
+                        .map(|mut v| v.push(trimmed.to_string()));
+                }
+            }
+        })
+    });
+
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    for _ in 0..2400 {
+        let (status, missing) = {
+            let mut guard = lock(&state.active_yt_scan)?;
+            match guard.get_mut(&scan_key) {
+                Some(process) => match process.try_wait() {
+                    Ok(status) => (status, false),
+                    Err(e) => {
+                        drop(guard);
+                        let mut guard = lock(&state.active_yt_scan)?;
+                        if let Some(mut child) = guard.remove(&scan_key) {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        let _ = lock(&state.cancelled_yt_scans).map(|mut s| s.remove(&scan_key));
+                        if let Some(thread) = stdout_thread {
+                            let _ = thread.join();
+                        }
+                        if let Some(thread) = stderr_thread {
+                            let _ = thread.join();
+                        }
+                        return Err(format!("Failed to poll yt-dlp: {}", e));
+                    }
+                },
+                None => (None, true),
+            }
+        };
+        if missing {
+            let _ = lock(&state.cancelled_yt_scans).map(|mut s| s.remove(&scan_key));
+            if let Some(thread) = stdout_thread {
+                let _ = thread.join();
+            }
+            if let Some(thread) = stderr_thread {
+                let _ = thread.join();
+            }
+            return Err("Scan cancelled".to_string());
+        }
+        if let Some(status) = status {
+            exit_status = Some(status);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let status = match exit_status {
+        Some(status) => {
+            let mut guard = lock(&state.active_yt_scan)?;
+            guard.remove(&scan_key);
+            status
+        }
+        None => {
+            let mut guard = lock(&state.active_yt_scan)?;
+            if let Some(mut child) = guard.remove(&scan_key) {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            let _ = lock(&state.cancelled_yt_scans).map(|mut s| s.remove(&scan_key));
+            if let Some(thread) = stdout_thread {
+                let _ = thread.join();
+            }
+            if let Some(thread) = stderr_thread {
+                let _ = thread.join();
+            }
+            return Err("yt-dlp scan timed out after 4 minutes".to_string());
+        }
+    };
+
+    if let Some(thread) = stdout_thread {
+        let _ = thread.join();
+    }
+    if let Some(thread) = stderr_thread {
+        let _ = thread.join();
+    }
+    let _ = lock(&state.cancelled_yt_scans).map(|mut s| s.remove(&scan_key));
+
+    if !status.success() {
+        let stderr = stderr_lines
+            .lock()
+            .map(|guard| guard.join("\n"))
+            .unwrap_or_default();
+        println!("[âœ—] yt-dlp scan failed: {}", stderr);
+        return Err(match friendly_yt_error(&stderr) {
+            Some(f) => format!("{}\n\nDetails:\n{}", f, short_detail(&stderr)),
+            None => format!("yt-dlp failed: {}", short_detail(&stderr)),
+        });
+    }
+
+    let stdout = stdout_lines
+        .lock()
+        .map(|guard| guard.join("\n"))
+        .unwrap_or_default();
+    let meta: serde_json::Value = parse_first_json_object(&stdout)?;
+
+    let mut formats: Vec<serde_json::Value> = Vec::new();
+
+    if let Some(frames) = meta.get("formats").and_then(|v| v.as_array()) {
+        for f in frames {
+            let format_id = f
+                .get("format_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let ext = f
+                .get("ext")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let resolution = f
+                .get("resolution")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let fps = f.get("fps").and_then(|v| v.as_f64()).map(|n| n as u64);
+            let vcodec = f
+                .get("vcodec")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+                .to_string();
+            let acodec = f
+                .get("acodec")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+                .to_string();
+            let filesize = f.get("filesize").and_then(|v| v.as_f64()).map(|n| n as u64);
+            let tbr = f.get("tbr").and_then(|v| v.as_f64());
+            let height = f.get("height").and_then(|v| v.as_u64());
+            let format_note = f
+                .get("format_note")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let has_video = vcodec != "none";
+            let has_audio = acodec != "none";
+
+            // YouTube storyboards are thumbnail strips for player previews,
+            // not downloadable media. Skip those plus any other pseudo
+            // entries that have neither audio nor video codecs.
+            let is_downloadable = has_video || has_audio;
+            let looks_like_metadata = format_id.to_ascii_lowercase().contains("storyboard")
+                || format_note.to_ascii_lowercase().contains("storyboard");
+            if !is_downloadable || looks_like_metadata {
+                continue;
+            }
+
+            // Build a human-readable label
+            let mut label = String::new();
+            if has_video && has_audio {
+                label.push_str(&resolution);
+                if let Some(fps_val) = fps {
+                    label.push_str(&format!(" {}fps", fps_val));
+                }
+                label.push_str(" (video+audio)");
+            } else if has_video {
+                label.push_str(&resolution);
+                if let Some(fps_val) = fps {
+                    label.push_str(&format!(" {}fps", fps_val));
+                }
+                label.push_str(" (video only)");
+            } else if has_audio {
+                label.push_str(&format!("Audio {}", ext));
+                if let Some(tbr_val) = tbr {
+                    label.push_str(&format!(" {}kbps", tbr_val as u64));
+                }
+            }
+            if !format_note.is_empty() && !label.contains(&format_note) {
+                label.push_str(&format!(" [{}]", format_note));
+            }
+            if label.is_empty() {
+                label = format!("{} ({})", format_id, ext);
+            }
+
+            // A video-only format can't be played as a standalone file unless a
+            // merger combines it with audio. Mark it so the UI can tag it and
+            // hide it when no merger is active.
+            let requires_merger = has_video && !has_audio;
+
+            formats.push(json!({
+                "format_id": format_id,
+                "label": label,
+                "ext": ext,
+                "resolution": resolution,
+                "fps": fps,
+                "vcodec": vcodec,
+                "acodec": acodec,
+                "filesize": filesize,
+                "tbr": tbr,
+                "height": height,
+                "format_note": format_note,
+                "has_video": has_video,
+                "has_audio": has_audio,
+                "requires_merger": requires_merger,
+            }));
+        }
+    }
+
+    // Sort: combined video+audio first, then by resolution height desc
+    formats.sort_by(|a, b| {
+        let a_combined = a
+            .get("has_video")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            && a.get("has_audio")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        let b_combined = b
+            .get("has_video")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            && b.get("has_audio")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        b_combined.cmp(&a_combined).then_with(|| {
+            let a_h: u64 = a
+                .get("resolution")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.trim_end_matches('p').parse().ok())
+                .unwrap_or(0);
+            let b_h: u64 = b
+                .get("resolution")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.trim_end_matches('p').parse().ok())
+                .unwrap_or(0);
+            b_h.cmp(&a_h)
+        })
+    });
+
+    // YouTube rarely returns native combined (video+audio) formats beyond a
+    // low-res progressive stream, so per-resolution "video+audio" rows would
+    // otherwise never appear. Synthesize one merged combo per video height
+    // when a merger is installed â€” `add_yt_download` translates these ids
+    // into a bestvideo[height<=H]+bestaudio merge. They carry
+    // requires_merger so the UI hides them when no merger is available.
+    if resolved_merger(&app).is_some() {
+        let mut heights: Vec<u64> = formats
+            .iter()
+            .filter(|f| {
+                f.get("has_video")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                    && !f
+                        .get("has_audio")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+            })
+            .filter_map(|f| {
+                if let Some(h) = f.get("height").and_then(|v| v.as_u64()) {
+                    if h > 0 {
+                        return Some(h);
+                    }
+                }
+                // Fallback: parse "1080p" or "1920x1080" resolution strings.
+                f.get("resolution")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| {
+                        s.split('x')
+                            .last()
+                            .and_then(|p| p.trim_end_matches('p').parse::<u64>().ok())
+                    })
+                    .filter(|h| *h > 0)
+            })
+            .collect();
+        heights.sort_unstable();
+        heights.dedup();
+        // Insert ascending at position 0 so the final order is height-desc.
+        for h in heights {
+            formats.insert(
+                0,
+                json!({
+                    "format_id": format!("merge:{}", h),
+                    "label": format!("{}p (video+audio, merged)", h),
+                    "ext": "mp4",
+                    "resolution": format!("{}p", h),
+                    "fps": null,
+                    "vcodec": "bestvideo",
+                    "acodec": "bestaudio",
+                    "filesize": null,
+                    "tbr": null,
+                    "height": h,
+                    "format_note": "Merged video+audio",
+                    "has_video": true,
+                    "has_audio": true,
+                    "requires_merger": true,
+                }),
+            );
+        }
+    }
+
+    // yt-dlp never lists mp3 as a native format because it is produced by
+    // --extract-audio. Expose it as a first-class option so every UI that
+    // calls scan_yt_formats (including already-built clients) can offer it.
+    let already_has_mp3 = formats.iter().any(|f| {
+        f.get("ext").and_then(|v| v.as_str()).unwrap_or("") == "mp3"
+            && f.get("has_audio")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+    });
+    if !already_has_mp3 {
+        formats.insert(
+            0,
+            json!({
+                "format_id": "bestaudio",
+                "ext": "mp3",
+                "resolution": "",
+                "fps": null,
+                "vcodec": "none",
+                "acodec": "mp3",
+                "filesize": null,
+                "tbr": null,
+                "format_note": "Audio converted to MP3",
+                "has_video": false,
+                "has_audio": true,
+                "requires_merger": false,
+                "label": "MP3 (best audio quality)",
+            }),
+        );
+    }
+
+    // YouTube only sporadically lists native combined (video+audio) formats
+    // anymore â€” most videos expose just a low-res 360p combined stream plus
+    // separate video-only/audio-only tracks. Always offer a best-quality
+    // combined option so the scan modal reliably has a video+audio choice.
+    // `add_yt_download` translates this synthetic id into a bestvideo+bestaudio
+    // merge (falling back to a pre-merged stream when no merger is installed).
+    formats.insert(
+        0,
+        json!({
+            "format_id": "best",
+            "ext": "mp4",
+            "resolution": "",
+            "fps": null,
+            "vcodec": "avc1.64002a",
+            "acodec": "mp4a.40.2",
+            "filesize": null,
+            "tbr": null,
+            "format_note": "",
+            "has_video": true,
+            "has_audio": true,
+            "requires_merger": false,
+            "label": "Best quality (video+audio)",
+        }),
+    );
+
+    Ok(json!({
+        "formats": formats,
+        "mergerAvailable": resolved_merger(&app).is_some(),
+    }))
+}
+
+pub async fn add_yt_download(
+    app: crate::ctx::AppHandle,
+    url: String,
+    format: String,
+    quality: Option<String>,
+    path: Option<String>,
+    browser: Option<String>,
+    format_id: Option<String>,
+    has_video: Option<bool>,
+    has_audio: Option<bool>,
+) -> Result<String, String> {
+    if url.trim().is_empty() {
+        return Err("URL cannot be empty".to_string());
+    }
+
+    // Hold onto the user-supplied quality so we can pick the right code
+    // path (direct yt-dlp vs aria2 handoff) BEFORE later code consumes
+    // the original.
+    let orig_quality = quality.clone();
+
+    let _ = app.emit("yt-log", format!("[start] Downloading: {}", url));
+
+    let download_dir = if let Some(p) = path.filter(|s| !s.trim().is_empty()) {
+        p
+    } else {
+        download_location(&app)?
+    };
+
+    // Prepare yt-dlp args
+    let mut args: Vec<String> = Vec::new();
+
+    // Output template (use forward slashes for yt-dlp)
+    let out_template = format!("{}/%(title)s.%(ext)s", download_dir.replace('\\', "/"));
+    args.push("-o".to_string());
+    args.push(out_template);
+    // Ask yt-dlp to report its real final path (after move/post-processing)
+    // with a marker prefix â€” the predicted filename often differs from what's
+    // on disk (yt-dlp's own title sanitization + real container ext).
+    // run_direct_yt_download captures this into the completed DB record.
+    args.push("--print".to_string());
+    args.push(format!("after_move:{}{}", FILEPATH_MARKER, "%(filepath)s"));
+
+    let _ = app.emit(
+        "yt-log",
+        format!(
+            "[setup] Format: {}, Browser: {}",
+            format,
+            browser.as_deref().unwrap_or("firefox")
+        ),
+    );
+
+    println!("[~] Launching yt-dlp with args: {:?}", redact_proxy_args(&args));
+
+    // A merger (MP4Box by default, or optional ffmpeg) lets yt-dlp combine
+    // separate video+audio streams, so high-res formats (which are video-only)
+    // become usable with audio.
+    let has_merger = resolved_merger(&app).is_some();
+
+    if let Some(ref fid) = format_id {
+        // User selected a specific format from the scan results.
+        if format.to_lowercase() == "mp3" {
+            args.push("-f".to_string());
+            args.push(fid.clone());
+            args.push("--extract-audio".to_string());
+            args.push("--audio-format".to_string());
+            args.push("mp3".to_string());
+            args.push("--audio-quality".to_string());
+            args.push("0".to_string());
+        } else if fid == "best" {
+            // The synthetic "Best quality (video+audio)" scan option: merge the
+            // best video and audio streams (or fall back to a pre-merged stream
+            // when no merger is installed).
+            if has_merger {
+                args.push("-f".to_string());
+                // /best covers muxed-only listings (e.g. X), where bestvideo
+                // matches nothing.
+                args.push("bestvideo+bestaudio/best".to_string());
+                args.push("--merge-output-format".to_string());
+                args.push("mp4".to_string());
+                args.push("--remux-video".to_string());
+                args.push("mp4".to_string());
+            } else {
+                args.push("-f".to_string());
+                args.push("best[ext=mp4]/best".to_string());
+                args.push("--remux-video".to_string());
+                args.push("mp4".to_string());
+            }
+        } else if let Some(h) = fid.strip_prefix("merge:") {
+            // Synthetic per-resolution merged combo from the scan results:
+            // best video at/below that height plus best audio, merged to mp4.
+            // (Unparsable height degrades to best video; the scan only emits
+            // numeric heights.)
+            let capped: u32 = h.parse().unwrap_or(u32::MAX);
+            if has_merger {
+                args.push("-f".to_string());
+                args.push(format!(
+                    "bestvideo[height<={0}]+bestaudio/best[height<={0}]/best",
+                    capped
+                ));
+                args.push("--merge-output-format".to_string());
+                args.push("mp4".to_string());
+            } else {
+                args.push("-f".to_string());
+                args.push(format!("best[height<={}]/best", capped));
+            }
+            args.push("--remux-video".to_string());
+            args.push("mp4".to_string());
+        } else if has_video == Some(true) && has_audio == Some(true) {
+            // The picked format is already muxed (audio+video in one stream,
+            // e.g. X/Twitter variants or YouTube progressive). Download it
+            // directly â€” attaching +bestaudio would build a combination that
+            // does not exist ("Requested format is not available").
+            args.push("-f".to_string());
+            args.push(fid.clone());
+            args.push("--remux-video".to_string());
+            args.push("mp4".to_string());
+        } else if has_merger {
+            // The selected format may be video-only; attach the best audio and
+            // merge so the file always has sound. yt-dlp picks bestaudio that
+            // matches the video's container; remux to mp4 afterwards.
+            // /best rescues muxed-only listings (bestvideo matches nothing
+            // there) and rotated ids â€” a playable file beats an error.
+            args.push("-f".to_string());
+            args.push(format!("{}+bestaudio/best", fid));
+            args.push("--merge-output-format".to_string());
+            args.push("mp4".to_string());
+            args.push("--remux-video".to_string());
+            args.push("mp4".to_string());
+        } else {
+            // No merger â€” a video-only format would yield a silent file, so
+            // fall back to the best combined format (has audio).
+            args.push("-f".to_string());
+            args.push("best[ext=mp4]/best".to_string());
+            args.push("--remux-video".to_string());
+            args.push("mp4".to_string());
+        }
+    } else if format.to_lowercase() == "mp3" {
+        args.push("--extract-audio".to_string());
+        args.push("--audio-format".to_string());
+        args.push("mp3".to_string());
+        args.push("--audio-quality".to_string());
+        args.push("0".to_string());
+    } else {
+        // mp4 branch
+        let q = quality.unwrap_or_else(|| "best".to_string());
+        if q == "best" {
+            if has_merger {
+                // Best quality shouldn't cap at the low-res combined format.
+                args.push("-f".to_string());
+                args.push("bestvideo+bestaudio/best".to_string());
+                args.push("--merge-output-format".to_string());
+                args.push("mp4".to_string());
+                args.push("--remux-video".to_string());
+                args.push("mp4".to_string());
+            } else {
+                args.push("-f".to_string());
+                args.push("best[ext=mp4]/best".to_string());
+                args.push("--remux-video".to_string());
+                args.push("mp4".to_string());
+            }
+        } else if let Ok(qn) = q.parse::<u32>() {
+            args.push("-f".to_string());
+            if has_merger {
+                args.push(format!(
+                    "bestvideo[height<={0}]+bestaudio/best[height<={0}]/best",
+                    qn
+                ));
+                args.push("--merge-output-format".to_string());
+                args.push("mp4".to_string());
+            } else {
+                args.push(format!("best[height<={}]/best", qn));
+            }
+            args.push("--remux-video".to_string());
+            args.push("mp4".to_string());
+        } else {
+            args.push("-f".to_string());
+            args.push("best".to_string());
+            args.push("--remux-video".to_string());
+            args.push("mp4".to_string());
+        }
+    }
+
+    // Point yt-dlp at ffmpeg's dir so merges (video+audio) always work, even
+    // when ffmpeg is not on PATH.
+    if let Some(ff) = resolved_merger(&app) {
+        if let Some(dir) = ff.parent() {
+            args.push("--ffmpeg-location".to_string());
+            args.push(dir.to_string_lossy().into_owned());
+        }
+    }
+
+    // A watch URL can carry ?list=...&index=... (e.g. endless radio mixes).
+    // Always scope to the single video â€” otherwise yt-dlp paginates the whole
+    // playlist (stalls the fetch) and would download every entry.
+    args.push("--no-playlist".to_string());
+
+    // Authentication: Use extension cookies if available, otherwise browser cookies
+    let selected_browser = browser.unwrap_or_else(|| "firefox".to_string());
+    let cookie_path = extension_cookie_path(&app);
+
+    if let Some(ref cp) = cookie_path {
+        args.push("--cookies".to_string());
+        args.push(cp.clone());
+        println!("[ðŸª] add_yt_download using extension cookies: {}", cp);
+    } else {
+        args.push("--cookies-from-browser".to_string());
+        args.push(selected_browser.clone());
+        println!("[*] Using browser for cookies: {}", selected_browser);
+    }
+
+    // Request headers to avoid YouTube throttling + impersonate Chrome so
+    // bot-detection doesn't reset the connection (10054/10061).
+    args.push("--user-agent".to_string());
+    args.push("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".to_string());
+    args.push("--impersonate".to_string());
+    args.push("chrome".to_string());
+
+    // Retry logic for 429 errors (too many requests)
+    args.push("--socket-timeout".to_string());
+    args.push("30".to_string());
+    args.push("--retries".to_string());
+    args.push("5".to_string());
+    args.push("--retry-sleep".to_string());
+    args.push("http:5".to_string()); // 5 second delay between retries
+
+    push_yt_proxy_args(&mut args, &app)?;
+
+    // Format selection is already handled above in the mp4 branch (lines 706-720)
+    // Do not add another -f flag here, as it would override the quality selection
+
+    args.push("--extractor-args".to_string());
+    args.push(YT_PLAYER_CLIENTS.to_string());
+
+    push_yt_runtime_args(&mut args, &app)?;
+
+    // Instead of launching yt-dlp to do the download via an external aria2 process (which won't be visible
+    // to the app's aria2 RPC), ask yt-dlp for the direct media URL(s) and add them to the app's aria2 RPC.
+    // This keeps all transfers in the same aria2 instance the UI monitors.
+
+    // Generate a short unique token to tag aria2 requests started by yt-dlp.
+    // ponytail: timestamp token avoids adding deps like uuid.
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let ytdlp_token = format!("mh-{}", ts);
+    println!("[*] yt-dlp aria2 token: {}", ytdlp_token);
+
+    // Force progress output onto separate lines so BufReader can stream
+    // status updates while the direct download is running.
+    args.push("--progress".to_string());
+    args.push("--newline".to_string());
+
+    // YouTube throttles individual connections on DASH streams. Download a
+    // few fragments concurrently while keeping the buffer reasonably small so
+    // memory stays flat even on large playlists/files.
+    args.push("--concurrent-fragments".to_string());
+    args.push("4".to_string());
+    args.push("--buffer-size".to_string());
+    args.push("1M".to_string());
+    // Chunked HTTP requests are yt-dlp's recommended way around
+    // per-connection throttling. 10M keeps the ceiling low (about 40MB
+    // worst case with 4 concurrent fragments) while still helping
+    // single-stream progressive downloads.
+    args.push("--http-chunk-size".to_string());
+    args.push("10M".to_string());
+
+    // Append the URL as the final positional argument so yt-dlp sees it
+    // when we run the same `args` Vec directly (best-quality path).
+    // For metadata-only runs we still copy `args` without this URL into
+    // `meta_args` below, then push the URL there.
+    args.push(url.clone());
+
+    // Instead of only getting the URL, request yt-dlp JSON metadata so a sensible filename can be built.
+    // Include cookies and UA so metadata resolves for private videos.
+    let mut meta_args: Vec<String> = Vec::new();
+    // Avoid loading any user/global yt-dlp config which may force formats or other options
+    meta_args.push("--no-config".to_string());
+    meta_args.push("-j".to_string()); // print JSON
+    meta_args.push("--no-warnings".to_string());
+    meta_args.push("--socket-timeout".to_string());
+    meta_args.push("20".to_string());
+    meta_args.push("--no-check-formats".to_string());
+    // Scope watch URLs with ?list=... to the single video (see --no-playlist
+    // on the download args above) â€” same stall/whole-playlist hazard here.
+    meta_args.push("--no-playlist".to_string());
+    meta_args.push("--extractor-args".to_string());
+    meta_args.push(YT_PLAYER_CLIENTS.to_string());
+    if let Some(ref cp) = cookie_path {
+        meta_args.push("--cookies".to_string());
+        meta_args.push(cp.clone());
+    } else {
+        meta_args.push("--cookies-from-browser".to_string());
+        meta_args.push(selected_browser.clone());
+    }
+    meta_args.push("--user-agent".to_string());
+    meta_args.push("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".to_string());
+    meta_args.push("--impersonate".to_string());
+    meta_args.push("chrome".to_string());
+    push_yt_runtime_args(&mut meta_args, &app)?;
+    push_yt_proxy_args(&mut meta_args, &app)?;
+    meta_args.push(url.clone());
+
+    println!(
+        "[~] Running yt-dlp to fetch metadata: {:?}",
+        redact_proxy_args(&meta_args)
+    );
+
+    let _ = app.emit("yt-log", "[meta] Fetching video metadata...".to_string());
+
+    let bin_path = yt_dlp_bin_path(&app)?;
+    let output = run_yt_bin_timeout(&app, &bin_path, &meta_args, "meta", META_TIMEOUT_SECS).await;
+
+    match output {
+        Ok(out) => {
+            // final_out will hold the successful process output (initial or retry)
+            let mut final_out = out;
+
+            if !final_out.status.success() {
+                let stderr = String::from_utf8_lossy(&final_out.stderr).to_string();
+                println!("[!] yt-dlp failed to get metadata: {}", stderr);
+
+                // Retry: some videos fail when yt-dlp is implicitly asked for a format not available.
+                // Try a secondary metadata attempt forcing -f best (no-config) before giving up.
+                println!("[~] Retrying yt-dlp metadata with -f best (no-config)");
+                let mut retry_args = meta_args.clone();
+                // url is last element; pop it, insert -f best, then push url back
+                let url_arg = retry_args.pop().unwrap_or_else(|| url.clone());
+                retry_args.push("-f".to_string());
+                retry_args.push("best".to_string());
+                retry_args.push(url_arg.clone());
+
+                let retry_output =
+                    run_yt_bin_timeout(&app, Path::new(&bin_path), &retry_args, "retry", 90).await;
+
+                match retry_output {
+                    Ok(rout) if rout.status.success() => {
+                        println!("[âœ“] yt-dlp metadata retry succeeded");
+                        final_out = rout; // use retry output for downstream parsing
+                    }
+                    Ok(rout) => {
+                        // If retry also failed, try to collect available formats to help debugging
+                        let mut list_args = vec![
+                            "--no-config".to_string(),
+                            "--list-formats".to_string(),
+                        ];
+                        push_yt_proxy_args(&mut list_args, &app)?;
+                        list_args.push(url.clone());
+                        let list_out = run_yt_bin_timeout(
+                            &app,
+                            Path::new(&bin_path),
+                            &list_args,
+                            "formats",
+                            60,
+                        )
+                        .await;
+                        let mut formats_txt = String::new();
+                        if let Ok(lo) = list_out {
+                            // include both stdout and stderr since yt-dlp may write to either
+                            let so = String::from_utf8_lossy(&lo.stdout).to_string();
+                            let se = String::from_utf8_lossy(&lo.stderr).to_string();
+                            formats_txt = format!("{}\n{}", so, se).trim().to_string();
+                        }
+                        let rout_stderr =
+                            String::from_utf8_lossy(&rout.stderr).to_string();
+                        println!(
+                            "[âœ—] yt-dlp metadata retry failed: {}\nFormats:\n{}",
+                            rout_stderr, formats_txt
+                        );
+                        let raw = format!(
+                            "yt-dlp failed: {}\nAvailable formats:\n{}",
+                            rout_stderr, formats_txt
+                        );
+                        return Err(match friendly_yt_error(&raw) {
+                            Some(f) => format!("{}\n\nDetails:\n{}", f, short_detail(&raw)),
+                            None => raw,
+                        });
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "yt-dlp metadata retry failed: {}\nInitial error:\n{}",
+                            e, stderr
+                        ));
+                    }
+                }
+            }
+
+            let stdout = String::from_utf8_lossy(&final_out.stdout).to_string();
+            // Take the first JSON object; yt-dlp may print one per media entry.
+            let meta: serde_json::Value = parse_first_json_object(&stdout)?;
+
+            let duration_s = meta.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let duration_txt = if duration_s > 0.0 {
+                format!("{}:{:02}", (duration_s as u64) / 60, (duration_s as u64) % 60)
+            } else {
+                "unknown length".to_string()
+            };
+            let filesize_txt = meta
+                .get("filesize_approx")
+                .or_else(|| meta.get("filesize"))
+                .and_then(|v| v.as_u64())
+                .map(format_bytes)
+                .unwrap_or_else(|| "unknown size".to_string());
+            let _ = app.emit(
+                "yt-log",
+                format!(
+                    "[meta] {} | {} | {} | {} | format_id={} container={}",
+                    meta.get("title").and_then(|t| t.as_str()).unwrap_or("unknown"),
+                    duration_txt,
+                    filesize_txt,
+                    meta.get("ext").and_then(|t| t.as_str()).unwrap_or("?"),
+                    format_id.as_deref().unwrap_or("auto"),
+                    format,
+                ),
+            );
+
+            let urls: Vec<String> = choose_media_urls(&meta);
+
+            if urls.is_empty() {
+                return Err("yt-dlp returned no resolved URLs".to_string());
+            }
+
+            // Build filename early so both code paths (aria2 below and
+            // the direct-yt-dlp branch above) can use it.
+            let title = meta
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("download");
+            let ext = if format.to_lowercase() == "mp3" {
+                "mp3"
+            } else {
+                "mp4"
+            };
+            let safe_title: String = title
+                .chars()
+                .map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c })
+                .collect();
+            let filename = format!("{}.{}", safe_title, ext);
+
+            // ------------------------------------------------------------
+            // Decide: hand off to aria2 OR run yt-dlp directly.
+            // YouTube's CDN throttles parallel connections per-connection
+            // (not per-IP). aria2's split+max-connection-per-server=4 makes
+            // Best-quality downloads grind to ~2KB/s or stall at 0KB.
+            // For Best quality we already need mp4 merging, so let yt-dlp
+            // do the whole job (download + mp4box remux) â€” same code path
+            // as the 403 fallback. Specific resolutions (1080p/720p/...)
+            // use pre-muxed formats that are fine through aria2 with
+            // split=1.
+            //
+            // We check the original `quality` BEFORE it gets consumed by
+            // `quality.unwrap_or_else(...)` further up.
+            // ------------------------------------------------------------
+            let best_quality = orig_quality
+                .as_deref()
+                .map(|q| q == "best" || q.is_empty())
+                .unwrap_or(true)
+                && format.to_lowercase() != "mp3";
+
+            // Pre-detect whether yt-dlp returned a single muxed URL or
+            // separate audio+video streams. If separate, aria2 is a bad
+            // path even at split=1 because we lose the audio stream.
+            let has_separate_streams = meta
+                .get("requested_formats")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.len() >= 2)
+                .unwrap_or(false);
+
+            if best_quality || has_separate_streams || format_id.is_some() {
+                let gid = format!("yt-dlp-direct-{}", ts);
+                // State the real requested quality â€” the old message always
+                // said "best quality" no matter what was picked.
+                let mut reasons: Vec<&str> = Vec::new();
+                if best_quality {
+                    reasons.push("best-quality requested (needs merge)");
+                }
+                if has_separate_streams {
+                    reasons.push("separate video+audio streams (aria2 would lose audio)");
+                }
+                if format_id.is_some() {
+                    reasons.push(&"specific format chosen");
+                }
+                if reasons.is_empty() {
+                    reasons.push("direct path");
+                }
+                let reason = reasons.join(", ");
+                println!(
+                    "[~] Using direct yt-dlp download in background ({}; format_id={} container={}): {:?}",
+                    reason,
+                    format_id.as_deref().unwrap_or("auto"),
+                    format,
+                    redact_proxy_args(&args)
+                );
+                let _ = app.emit(
+                    "yt-log",
+                    format!(
+                        "[engine] Direct download ({}; format_id={} container={})",
+                        reason,
+                        format_id.as_deref().unwrap_or("auto"),
+                        format,
+                    ),
+                );
+
+                let expected_path = Path::new(&download_dir).join(&filename);
+                let active_record = DownloadRecord {
+                    gid: gid.clone(),
+                    filename: filename.clone(),
+                    url: url.clone(),
+                    size: "0".to_string(),
+                    status: "active".to_string(),
+                    progress: 0,
+                    added_at: ts as i64,
+                    path: Some(expected_path.to_string_lossy().to_string()),
+                    connections: Some(1),
+                    source: Some("yt-dlp".to_string()),
+                    ytdlp_token: Some(ytdlp_token.clone()),
+                    proxy: None,
+        size_bytes: None,
+                };
+                if let Err(e) = crate::db::upsert_download(app.clone(), active_record) {
+                    println!(
+                        "[!] Failed to persist active yt-dlp download record (non-fatal): {}",
+                        e
+                    );
+                }
+                let _ = app.emit(
+                    "yt-dl-started",
+                    json!({"gid": gid, "filename": filename, "url": url}),
+                );
+
+                let task_app = app.clone();
+                let task_bin = bin_path.clone();
+                let task_args = args.clone();
+                let task_dir = download_dir.clone();
+                let task_filename = filename.clone();
+                let task_url = url.clone();
+                let task_token = ytdlp_token.clone();
+                let task_gid = gid.clone();
+                let added_at = ts as i64;
+
+                std::thread::spawn(move || {
+                    run_direct_yt_download(
+                        task_app,
+                        task_bin,
+                        task_args,
+                        task_gid,
+                        task_filename,
+                        task_url,
+                        task_dir,
+                        task_token,
+                        added_at,
+                    );
+                });
+
+                return Ok(gid);
+            }
+
+            // Handoff resolved media URLs to the app's aria2 via Aria2Client
+            let mut options_map = Map::new();
+            options_map.insert("out".to_string(), json!(filename));
+            options_map.insert("split".to_string(), json!("1"));
+            options_map.insert("max-connection-per-server".to_string(), json!("1"));
+            options_map.insert("allow-overwrite".to_string(), json!("true"));
+            if !download_dir.trim().is_empty() {
+                options_map.insert("dir".to_string(), json!(download_dir.replace('\\', "/")));
+            }
+            let hdrs = collect_http_headers(&meta, &ytdlp_token, &url);
+            options_map.insert("header".to_string(), json!(hdrs));
+
+            let aria = Aria2Client::new()?;
+            let _ = app.emit(
+                "yt-log",
+                format!(
+                    "[engine] Handing {} resolved URL(s) to aria2 (format_id={} container={})...",
+                    urls.len(),
+                    format_id.as_deref().unwrap_or("auto"),
+                    format,
+                ),
+            );
+            let gid_str = aria.add_uri(&urls, options_map).await?;
+            let _ = app.emit(
+                "yt-log",
+                format!("[aria2] Download queued â€” GID: {}", gid_str),
+            );
+            println!("[âœ“] Added to aria2 with GID: {}", gid_str);
+
+            // Detect quick 403 failures from signed URLs
+            if let Ok(details) = aria.tell_status(&gid_str).await {
+                let stat = details.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                let err_msg = details
+                    .get("errorMessage")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                let err_code = details
+                    .get("errorCode")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                if stat == "error"
+                    && (err_msg.contains("status=403")
+                        || err_msg.contains("403")
+                        || err_code == "22")
+                {
+                    let _ = app.emit(
+                        "yt-log",
+                        "[fallback] aria2 403 â€” switching to direct yt-dlp download...".to_string(),
+                    );
+                    println!(
+                        "[~] Aria2 reported 403 for GID {} â€” falling back to direct yt-dlp",
+                        gid_str
+                    );
+                    let direct_out = run_yt_bin(&app, Path::new(&bin_path), &args, "fallback");
+                    match direct_out {
+                        Ok(dout) if dout.status.success() => {
+                            let reported = String::from_utf8_lossy(&dout.stdout)
+                                .lines()
+                                .filter_map(|l| l.trim().strip_prefix(FILEPATH_MARKER))
+                                .map(|p| PathBuf::from(p.trim()))
+                                .find(|p| !p.as_os_str().is_empty() && p.exists());
+                            return persist_complete(
+                                &app,
+                                format!("yt-dlp-local-{}", ts),
+                                &filename,
+                                &url,
+                                &download_dir,
+                                &ytdlp_token,
+                                "yt-dlp-fallback",
+                                reported.as_deref(),
+                            );
+                        }
+                        Ok(dout) => {
+                            let derr = String::from_utf8_lossy(&dout.stderr).to_string();
+                            return Err(format!("yt-dlp direct download failed: {}", derr));
+                        }
+                        Err(e) => {
+                            return Err(format!(
+                                "Failed to execute yt-dlp for direct download: {}",
+                                e
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let expected_path = Path::new(&download_dir).join(&filename);
+            let upsert_record = DownloadRecord {
+                gid: gid_str.clone(),
+                filename: filename.clone(),
+                url: url.clone(),
+                size: "0".to_string(),
+                status: "active".to_string(),
+                progress: 0,
+                added_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64,
+                path: Some(expected_path.to_string_lossy().to_string()),
+                connections: Some(1),
+                source: Some("yt-dlp".to_string()),
+                ytdlp_token: Some(ytdlp_token.clone()),
+                proxy: None,
+        size_bytes: None,
+            };
+            if let Err(e) = crate::db::upsert_download(app.clone(), upsert_record) {
+                println!(
+                    "[!] Failed to persist yt-dlp download record (non-fatal): {}",
+                    e
+                );
+            }
+            let _ = app.emit(
+                "yt-dl-started",
+                json!({"gid": gid_str, "filename": filename, "source": "aria2"}),
+            );
+            return Ok(gid_str);
+        }
+        Err(e) => {
+            return Err(format!("Failed to execute yt-dlp: {}", e));
+        }
+    }
+}
+
+// â”€â”€ yt-dlp Integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+pub fn check_yt_dlp_exists(app: crate::ctx::AppHandle) -> Result<bool, String> {
+    let exe_path =
+        yt_dlp_bin_path(&app).map_err(|e| format!("yt-dlp lookup failed: {}", e))?;
+    if is_runnable_binary(&exe_path) {
+        return Ok(true);
+    }
+    // Bare-name fallback: a portable install has `yt-dlp` on PATH, which
+    // `.exists()` cannot see. `--version` is the cheapest proof it runs.
+    Ok(std::process::Command::new(&exe_path)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false))
+}
+
+/// Shared helper for resolving the `yt-dlp` executable path. Searches in
+/// order:
+///
+/// 1. App-local data binaries (e.g. `%LOCALAPPDATA%/com.werlos.moonhunt/binaries`)
+/// 2. Legacy `src-tauri/binaries/` from earlier development installs
+/// 3. `yt-dlp.exe` on PATH (release installs / system installs)
+pub fn yt_dlp_bin_path(app: &crate::ctx::AppHandle) -> Result<std::path::PathBuf, String> {
+    let packaged = app_bin_dir(app)?.join(yt_dlp_sidecar_name());
+    if is_runnable_binary(&packaged) {
+        return Ok(packaged);
+    }
+    let legacy = legacy_bin_dir()?.join(yt_dlp_sidecar_name());
+    if is_runnable_binary(&legacy) {
+        return Ok(legacy);
+    }
+    // Fall back to PATH lookup or plain `yt-dlp`
+    Ok(std::path::PathBuf::from(yt_dlp_command_name()))
+}
+
+/// Resolve the effective media merger (bundled ffmpeg, or a system ffmpeg),
+/// returning the path to the executable if one is available.
+pub(crate) fn resolved_merger(app: &crate::ctx::AppHandle) -> Option<PathBuf> {
+    crate::merger::resolved_merger_path(app)
+}
+
+pub fn get_yt_dlp_path(app: crate::ctx::AppHandle) -> Result<String, String> {
+    let path = yt_dlp_bin_path(&app)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+pub fn open_app_bin_folder(app: crate::ctx::AppHandle) -> Result<String, String> {
+    let dir = app_bin_dir(&app)?;
+    crate::util::open_path(&dir)
+        .map_err(|e| format!("Failed to open folder {}: {}", dir.display(), e))?;
+    Ok(format!("Opened folder: {}", dir.display()))
+}
+
+pub fn open_yt_dlp_location(app: crate::ctx::AppHandle) -> Result<String, String> {
+    let exe_path = yt_dlp_bin_path(&app)?;
+    if !exe_path.exists() {
+        return Err("yt-dlp not installed".to_string());
+    }
+    let target = exe_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| exe_path.clone());
+    crate::util::open_path(&target)
+        .map_err(|e| format!("Failed to open yt-dlp folder {}: {}", target.display(), e))?;
+    Ok(format!("Opened yt-dlp folder: {}", target.display()))
+}
+
+pub fn uninstall_yt_dlp(app: crate::ctx::AppHandle) -> Result<String, String> {
+    // Remove whatever sits at the sidecar path, even if it is a stub/corrupt
+    // file that `yt_dlp_bin_path` would now skip.
+    for dir in [app_bin_dir(&app)?, legacy_bin_dir()?] {
+        let exe_path = dir.join(yt_dlp_sidecar_name());
+        if exe_path.exists() {
+            std::fs::remove_file(&exe_path)
+                .map_err(|e| format!("Failed to delete yt-dlp: {}", e))?;
+            return Ok("Uninstalled yt-dlp".to_string());
+        }
+    }
+    Err("yt-dlp not found".to_string())
+}
+
+pub async fn install_yt_dlp(app: crate::ctx::AppHandle) -> Result<String, String> {
+    use futures_util::StreamExt;
+    use std::io::Write;
+
+    crate::install_cancel::clear(YT_DLP_INSTALL_CANCEL_KEY);
+    let client = crate::util::configured_http_client(&app)?;
+    let download_url = yt_dlp_download_url();
+
+    println!("[~] Downloading yt-dlp from {}", download_url);
+    if crate::install_cancel::is_cancelled(YT_DLP_INSTALL_CANCEL_KEY) {
+        return Err("Install cancelled".to_string());
+    }
+    let resp = client
+        .get(download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download yt-dlp: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("yt-dlp HTTP error: {}", resp.status()));
+    }
+    if crate::install_cancel::is_cancelled(YT_DLP_INSTALL_CANCEL_KEY) {
+        return Err("Install cancelled".to_string());
+    }
+
+    let total = resp.content_length().unwrap_or(0);
+
+    let bin_dir = app_bin_dir(&app)?;
+    std::fs::create_dir_all(&bin_dir).map_err(|e| format!("Failed to create bin dir: {}", e))?;
+    let out_path = bin_dir.join(yt_dlp_sidecar_name());
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&out_path)
+        .map_err(|e| format!("Failed to open output file: {}", e))?;
+
+    let mut downloaded: u64 = 0;
+
+    let mut stream = resp.bytes_stream();
+    while let Some(item) = stream.next().await {
+        if crate::install_cancel::is_cancelled(YT_DLP_INSTALL_CANCEL_KEY) {
+            drop(file);
+            let _ = std::fs::remove_file(&out_path);
+            crate::install_cancel::clear(YT_DLP_INSTALL_CANCEL_KEY);
+            return Err("Install cancelled".to_string());
+        }
+
+        let chunk = item.map_err(|e| format!("Stream error: {}", e))?;
+        file.write_all(&chunk)
+            .map_err(|e| format!("Failed to write chunk: {}", e))?;
+        downloaded += chunk.len() as u64;
+
+        let percent = if total > 0 {
+            (downloaded as f64 / total as f64 * 100.0).min(100.0)
+        } else {
+            0.0
+        };
+
+        let _ = app.emit(
+            "yt_install_progress",
+            json!({
+                "downloaded": downloaded,
+                "total": total,
+                "percent": percent
+            }),
+        );
+    }
+
+    if crate::install_cancel::is_cancelled(YT_DLP_INSTALL_CANCEL_KEY) {
+        drop(file);
+        let _ = std::fs::remove_file(&out_path);
+        crate::install_cancel::clear(YT_DLP_INSTALL_CANCEL_KEY);
+        return Err("Install cancelled".to_string());
+    }
+
+    file.flush()
+        .map_err(|e| format!("Failed to flush file: {}", e))?;
+    drop(file);
+
+    if crate::install_cancel::is_cancelled(YT_DLP_INSTALL_CANCEL_KEY) {
+        let _ = std::fs::remove_file(&out_path);
+        crate::install_cancel::clear(YT_DLP_INSTALL_CANCEL_KEY);
+        return Err("Install cancelled".to_string());
+    }
+
+    // Emit completion (100%) if total was unknown
+    let _ = app.emit(
+        "yt_install_progress",
+        json!({
+            "downloaded": downloaded,
+            "total": total,
+            "percent": 100.0
+        }),
+    );
+
+    crate::install_cancel::clear(YT_DLP_INSTALL_CANCEL_KEY);
+
+    // On Unix, the downloaded binary needs execute permission.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o755));
+    }
+
+    println!("[âœ“] yt-dlp saved to {}", out_path.display());
+    Ok(format!("Saved yt-dlp to {}", out_path.display()))
+}
+
+pub fn cancel_yt_dlp_install() -> Result<String, String> {
+    crate::install_cancel::request_cancel(YT_DLP_INSTALL_CANCEL_KEY);
+    Ok("Cancelling yt-dlp install".to_string())
+}
+
+// â”€â”€ Browser Extension (EJS) Management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+pub fn uninstall_ejs(app: crate::ctx::AppHandle) -> Result<String, String> {
+    // Remove EJS solver files from binaries/.
+    let ejs_dir = ejs_bin_dir(&app)?;
+    if ejs_dir.exists() {
+        std::fs::remove_dir_all(&ejs_dir)
+            .map_err(|e| format!("Failed to delete EJS dir: {}", e))?;
+        Ok("Uninstalled EJS files".to_string())
+    } else {
+        Err("EJS not found".to_string())
+    }
+}
+
+pub fn check_ejs_exists(app: crate::ctx::AppHandle) -> Result<bool, String> {
+    // Check if EJS solver scripts exist in app-local data binaries/.
+    let ejs_dir = ejs_bin_dir(&app)?;
+    // Consider installed if primary solver file exists
+    Ok(ejs_dir.join("yt.solver.lib.min.js").exists() || ejs_dir.join("yt.solver.lib.js").exists())
+}
+
+fn ejs_bin_dir(app: &crate::ctx::AppHandle) -> Result<PathBuf, String> {
+    let new_dir = app_bin_dir(app)?.join("ejs");
+    let legacy_dir = legacy_bin_dir()?.join("ejs");
+    let solver_exists = |dir: &Path| {
+        dir.join("yt.solver.lib.min.js").exists() || dir.join("yt.solver.lib.js").exists()
+    };
+    if solver_exists(&new_dir) {
+        return Ok(new_dir);
+    }
+    if solver_exists(&legacy_dir) {
+        return Ok(legacy_dir);
+    }
+    Ok(new_dir)
+}
+
+pub fn get_ejs_path(app: crate::ctx::AppHandle) -> Result<String, String> {
+    Ok(ejs_bin_dir(&app)?.to_string_lossy().into_owned())
+}
+
+pub fn open_ejs_location(app: crate::ctx::AppHandle) -> Result<String, String> {
+    let ejs_dir = ejs_bin_dir(&app)?;
+    if !ejs_dir.exists() {
+        return Err("EJS not installed".to_string());
+    }
+    crate::util::open_path(&ejs_dir)
+        .map_err(|e| format!("Failed to open EJS folder {}: {}", ejs_dir.display(), e))?;
+    Ok(format!("Opened EJS folder: {}", ejs_dir.display()))
+}
+
+pub async fn install_ejs(app: crate::ctx::AppHandle) -> Result<String, String> {
+    use futures_util::StreamExt;
+    use std::io::Write;
+
+    crate::install_cancel::clear(EJS_INSTALL_CANCEL_KEY);
+    let client = crate::util::configured_http_client(&app)?;
+    let api_url = "https://api.github.com/repos/yt-dlp/ejs/releases/latest";
+
+    println!(
+        "[~] Querying EJS latest release via GitHub API: {}",
+        api_url
+    );
+    let resp = client
+        .get(api_url)
+        .header("User-Agent", "moonhunt")
+        .header("Accept", "application/vnd.github.v3+json")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to query GitHub API: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API HTTP error: {}", resp.status()));
+    }
+
+    let release: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse GitHub release JSON: {}", e))?;
+
+    let assets = release
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .ok_or("No assets found in release")?;
+
+    // Prefer minified solver files
+    let preferred = [
+        "yt.solver.lib.min.js",
+        "yt.solver.lib.js",
+        "yt.solver.core.min.js",
+        "yt.solver.core.js",
+    ];
+    let mut to_download: Vec<(String, String)> = Vec::new(); // (name, url)
+
+    for p in &preferred {
+        for asset in assets {
+            if let Some(name) = asset.get("name").and_then(|n| n.as_str()) {
+                if name == *p {
+                    if let Some(url) = asset.get("browser_download_url").and_then(|u| u.as_str()) {
+                        to_download.push((name.to_string(), url.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    // If none matched, try to collect any .js files as fallback
+    if to_download.is_empty() {
+        for asset in assets {
+            if let Some(name) = asset.get("name").and_then(|n| n.as_str()) {
+                if name.ends_with(".js") {
+                    if let Some(url) = asset.get("browser_download_url").and_then(|u| u.as_str()) {
+                        to_download.push((name.to_string(), url.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    if to_download.is_empty() {
+        return Err("No suitable JS assets found in ejs release".to_string());
+    }
+
+    let ejs_dir = app_bin_dir(&app)?.join("ejs");
+    std::fs::create_dir_all(&ejs_dir).map_err(|e| format!("Failed to create ejs dir: {}", e))?;
+
+    let mut written: Vec<PathBuf> = Vec::new();
+    for (name, url) in to_download.iter() {
+        if crate::install_cancel::is_cancelled(EJS_INSTALL_CANCEL_KEY) {
+            cleanup_written_files(&written);
+            crate::install_cancel::clear(EJS_INSTALL_CANCEL_KEY);
+            return Err("Install cancelled".to_string());
+        }
+
+        println!("[~] Downloading {} -> {}", name, url);
+        let resp = client
+            .get(url)
+            .header("User-Agent", "moonhunt")
+            .send()
+            .await
+            .map_err(|e| format!("Failed to download {}: {}", name, e))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "Download HTTP error for {}: {}",
+                name,
+                resp.status()
+            ));
+        }
+        if crate::install_cancel::is_cancelled(EJS_INSTALL_CANCEL_KEY) {
+            cleanup_written_files(&written);
+            crate::install_cancel::clear(EJS_INSTALL_CANCEL_KEY);
+            return Err("Install cancelled".to_string());
+        }
+        let total = resp.content_length().unwrap_or(0);
+        let out_path = ejs_dir.join(name);
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&out_path)
+            .map_err(|e| format!("Failed to open {}: {}", out_path.display(), e))?;
+        written.push(out_path.clone());
+        let mut downloaded: u64 = 0;
+        let mut stream = resp.bytes_stream();
+        while let Some(item) = stream.next().await {
+            if crate::install_cancel::is_cancelled(EJS_INSTALL_CANCEL_KEY) {
+                drop(file);
+                cleanup_written_files(&written);
+                crate::install_cancel::clear(EJS_INSTALL_CANCEL_KEY);
+                return Err("Install cancelled".to_string());
+            }
+
+            let chunk = item.map_err(|e| format!("Stream error: {}", e))?;
+            file.write_all(&chunk)
+                .map_err(|e| format!("Failed to write chunk: {}", e))?;
+            downloaded += chunk.len() as u64;
+            let percent = if total > 0 {
+                (downloaded as f64 / total as f64 * 100.0).min(100.0)
+            } else {
+                0.0
+            };
+            let _ = app.emit(
+                "ejs_install_progress",
+                json!({"name": name, "downloaded": downloaded, "total": total, "percent": percent}),
+            );
+        }
+        if crate::install_cancel::is_cancelled(EJS_INSTALL_CANCEL_KEY) {
+            drop(file);
+            cleanup_written_files(&written);
+            crate::install_cancel::clear(EJS_INSTALL_CANCEL_KEY);
+            return Err("Install cancelled".to_string());
+        }
+        file.flush()
+            .map_err(|e| format!("Failed to flush file: {}", e))?;
+        drop(file);
+    }
+
+    if crate::install_cancel::is_cancelled(EJS_INSTALL_CANCEL_KEY) {
+        cleanup_written_files(&written);
+        crate::install_cancel::clear(EJS_INSTALL_CANCEL_KEY);
+        return Err("Install cancelled".to_string());
+    }
+
+    crate::install_cancel::clear(EJS_INSTALL_CANCEL_KEY);
+    Ok(format!("Saved EJS assets to {}", ejs_dir.display()))
+}
+
+pub fn cancel_ejs_install() -> Result<String, String> {
+    crate::install_cancel::request_cancel(EJS_INSTALL_CANCEL_KEY);
+    Ok("Cancelling EJS install".to_string())
+}
+
+fn cleanup_written_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_plain_yt_dlp_progress() {
+        let p = parse_yt_progress("[download]  45.2% of 10.30MiB at 1.50MiB/s ETA 00:04")
+            .expect("plain progress line should parse");
+        assert!(p.total > 0);
+        assert!(p.completed > 0);
+        assert_eq!(p.speed, 1_572_864);
+    }
+
+    #[test]
+    fn parses_progress_with_ansi_prefix() {
+        let p = parse_yt_progress("\u{1b}[K[download]  45.2% of 10.30MiB at 1.50MiB/s ETA 00:04")
+            .expect("ansi-prefixed progress line should parse");
+        assert!(p.total > 0);
+        assert_eq!(p.speed, 1_572_864);
+    }
+
+    #[test]
+    fn ignores_non_progress_lines() {
+        assert!(parse_yt_progress("[youtube] Extracting URL: https://example.com").is_none());
+    }
+
+    #[test]
+    fn impersonate_cache_follows_the_binary_path() {
+        let mut cache = None;
+        let mut calls: Vec<PathBuf> = Vec::new();
+        let mut probe = |bin: &Path| {
+            calls.push(bin.to_path_buf());
+            bin.ends_with("sidecar")
+        };
+        let sidecar = PathBuf::from("sidecar");
+        let path_bin = PathBuf::from("yt-dlp.exe");
+        assert!(super::cached_flag(&mut cache, &sidecar, &mut probe));
+        assert!(super::cached_flag(&mut cache, &sidecar, &mut probe));
+        assert!(!super::cached_flag(&mut cache, &path_bin, &mut probe));
+        assert_eq!(
+            calls,
+            vec![PathBuf::from("sidecar"), PathBuf::from("yt-dlp.exe")]
+        );
+    }
+}

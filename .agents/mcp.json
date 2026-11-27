@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "egui": {
+      "command": "C:\\Users\\werlos\\.cargo\\bin\\egui-mcp.exe",
+      "args": []
+    }
+  }
+}
